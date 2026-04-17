@@ -5,34 +5,39 @@ End-to-end tooling to go from FRC match video → labeled dataset → YOLO train
 ## Pipeline
 
 ```
-video(s) ──► sample_frames.py ──► sampled_frames/*.jpg
+video(s) ──► SampleFrames.py ──► sampled_frames/*.jpg
                                         │
                                         ▼
                                   Label Studio
                                 (labeling_config.xml)
                                         │
+                                  ┌─────┴──────┐
+                                  ▼            ▼
+                          (local images)   (GCS images)
+                                  │            │
+                                  ▼            ▼
+                          ExtractData.py   TurntoImage.py
+                                  │            │
+                                  └─────┬──────┘
                                         ▼
-                                  export.json
+                                  split_data.py ──► yolo_data/
                                         │
                                         ▼
-                                  ls_to_yolo.py
-                                        │
-                                        ▼
-                                  yolo_dataset/  ──► Ultralytics training
+                                    train.py  ──► trained model
 ```
 
 ## 1. Sample frames
 
 ```bash
 pip install opencv-python yt-dlp
-python sample_frames.py path/to/match.mp4 --out sampled_frames --step 12
+python SampleFrames.py path/to/match.mp4 --out sampled_frames --step 12
 ```
 
 The input can be any of:
 
-- a local video file: `python sample_frames.py match.mp4`
-- a folder of videos: `python sample_frames.py videos/`
-- a YouTube URL: `python sample_frames.py "https://youtu.be/..."`
+- a local video file: `python SampleFrames.py match.mp4`
+- a folder of videos: `python SampleFrames.py videos/`
+- a YouTube URL: `python SampleFrames.py "https://youtu.be/..."`
 
 YouTube URLs are downloaded via `yt-dlp` (must be on PATH; `ffmpeg` too, which yt-dlp uses for merging and trimming). The downloaded video is cleaned up after sampling — pass `--keep-download` to keep it.
 
@@ -44,13 +49,13 @@ Use `--start` and `--end` to limit sampling to a window of the video. All three 
 
 ```bash
 # From 2:30 to 5:00 of the match
-python sample_frames.py match.mp4 --start 2:30 --end 5:00
+python SampleFrames.py match.mp4 --start 2:30 --end 5:00
 
 # Just a plain seconds value works too
-python sample_frames.py match.mp4 --start 150 --end 300
+python SampleFrames.py match.mp4 --start 150 --end 300
 
 # Full HH:MM:SS for long recordings (e.g. a whole event stream)
-python sample_frames.py "https://youtu.be/..." --start 1:23:45 --end 1:26:15 --step 12
+python SampleFrames.py "https://youtu.be/..." --start 1:23:45 --end 1:26:15 --step 12
 ```
 
 When both `--start` and `--end` are given with a YouTube URL, `yt-dlp` downloads only that slice instead of the full video — a big win for 6-hour event livestreams.
@@ -65,39 +70,78 @@ label-studio start
 Then, in the web UI (opens at http://localhost:8080):
 
 1. Create a new project.
-2. **Settings → Labeling Interface → Code tab** — paste the contents of `label_studio_project/labeling_config.xml`.
-3. **Import** the contents of `sampled_frames/` (drag-and-drop works; for large sets use the [local storage method](https://labelstud.io/guide/storage.html#Local-storage) so LS reads from disk instead of copying).
+2. **Settings → Labeling Interface → Code tab** — paste the contents of `labeling_config.xml`.
+3. **Import** the contents of `sampled_frames/` (drag-and-drop works; for large sets use the [local storage method](https://labelstud.io/guide/storage.html#Local-storage) so LS reads from disk instead of copying, or use GCS storage).
 4. Label away. Hotkeys `1` = Red, `2` = Blue.
 
 ## 3. Export and convert to YOLO format
 
-In Label Studio: **Export → JSON-MIN** (this format is the cleanest). Save it as `export.json`.
+In Label Studio: **Export → JSON** (full format). Save the export file.
+
+There are two paths depending on where your images live:
+
+### Option A: Images stored locally
+
+If the source images are already on disk (e.g. in `sampled_frames/`), use `ExtractData.py` to generate YOLO label files from the export:
 
 ```bash
-python ls_to_yolo.py export.json --images sampled_frames --out yolo_dataset
+python ExtractData.py
 ```
 
-This produces:
+Edit the `JSON_FILE` variable at the top of the script to point to your export filename. Labels are written to `labels/`.
 
-```
-yolo_dataset/
-    data.yaml
-    images/train/  images/val/
-    labels/train/  labels/val/
-```
+### Option B: Images stored in Google Cloud Storage
 
-with a default 80/20 train/val split (override with `--val-split 0.15`).
-
-## 4. Train YOLO
-
-Using Ultralytics (works for v8, v11, and the newer releases):
+If your Label Studio project references images in a GCS bucket (e.g. `gs://sprocket3/...`), use `TurntoImage.py` to download the images and create labels in one step:
 
 ```bash
-pip install ultralytics
-yolo detect train data=yolo_dataset/data.yaml model=yolo11n.pt epochs=100 imgsz=640
+pip install google-cloud-storage
+gcloud auth login
+python TurntoImage.py
 ```
 
-Swap `yolo11n.pt` for whichever checkpoint you're targeting — the `data.yaml` is agnostic to the model version. For FRC footage, starting from a nano or small pretrained checkpoint and fine-tuning is usually enough; a few hundred labeled frames can already get you a workable detector.
+Edit the `JSON_FILE` variable at the top of the script to point to your export filename. Images are downloaded to `images/` and labels are written to `labels/`.
+
+## 4. Split into train/val
+
+Once you have `images/` and `labels/` directories ready, run `split_data.py` to create the YOLO folder structure:
+
+```bash
+python split_data.py
+```
+
+This copies images and labels into an 80/20 train/val split:
+
+```
+yolo_data/
+    train/images/  train/labels/
+    val/images/    val/labels/
+```
+
+The split ratio is configured via `split_ratio` at the top of the script.
+
+## 5. Train YOLO
+
+The `train.py` script handles model loading and training using Ultralytics:
+
+```bash
+pip install ultralytics torch
+python train.py
+```
+
+This loads `yolo11x.pt` (extra-large checkpoint) and trains for 100 epochs at 640px on GPU. It will auto-detect your GPU and print a hardware check at startup. Results are saved to `my_yolo_project/version_1/`.
+
+To adjust settings (model size, batch size, epochs, etc.), edit the parameters in `train.py`. For FRC footage, starting from a nano or small pretrained checkpoint (`yolo11n.pt`, `yolo11s.pt`) and fine-tuning is usually enough; a few hundred labeled frames can already get you a workable detector.
+
+### Alternative: LS2YOLO.py (all-in-one)
+
+`LS2YOLO.py` is a self-contained alternative that handles export conversion, image copying, and train/val splitting in one command:
+
+```bash
+python LS2YOLO.py export.json --images sampled_frames --out yolo_dataset
+```
+
+It accepts both JSON and JSON-MIN exports and produces a ready-to-train dataset with `data.yaml` included. Override the default 80/20 split with `--val-split 0.15`.
 
 ## Tips specific to FRC footage
 

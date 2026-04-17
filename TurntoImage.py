@@ -4,7 +4,7 @@ from google.cloud import storage
 
 # --- CONFIGURATION ---
 JSON_FILE = 'project-2-at-2026-04-17-06-43-6bc53548.json'
-OUTPUT_DIR = 'yolo_dataset'
+OUTPUT_DIR = '.'
 CLASSES = ["Red Alliance Robot", "Blue Alliance Robot"]  # MUST match Label Studio exactly
 
 # Initialize GCS Client (Will use your 'gcloud auth login' credentials)
