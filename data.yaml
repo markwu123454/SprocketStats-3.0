@@ -3,6 +3,7 @@ path: yolo_data
 
 train: train/images
 val: val/images
+test: test/images
 
 # Number of classes
 nc: 2
