@@ -1,0 +1,19 @@
+<!--
+  Label Studio labeling interface for FRC robot detection.
+  Paste this into: Project → Settings → Labeling Interface → Code tab.
+
+  Two classes, color-coded to match alliance colors.
+  Keyboard hotkeys: 1 = Red, 2 = Blue. Makes labeling way faster.
+-->
+<View>
+  <Image name="image" value="$image" zoom="true" zoomControl="true"
+         rotateControl="false" brightnessControl="true" contrastControl="true"/>
+
+  <RectangleLabels name="label" toName="image">
+    <Label value="Red Alliance Robot"  background="#E53935" hotkey="1"/>
+    <Label value="Blue Alliance Robot" background="#1E88E5" hotkey="2"/>
+  </RectangleLabels>
+
+  <!-- Quick guidance shown above the image -->
+  <Header value="Draw a tight box around every visible robot. Hotkeys: 1=Red, 2=Blue."/>
+</View>
