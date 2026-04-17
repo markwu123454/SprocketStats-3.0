@@ -15,13 +15,14 @@ model = YOLO('yolo11x.pt')
 model.train(
     data='data.yaml',    
     epochs=100,
-    imgsz=1080,
+    imgsz=1280,
     batch=32,          
     device=0,
     workers=8,
     project='my_yolo_project',
     name='version_1_frc',
     exist_ok=True,
+    patience=25,
 
     # --- AUGMENTATION SETTINGS ---
     mosaic=1.0,          # 1.0 = On for every image. Combines 4 images into 1 grid.
