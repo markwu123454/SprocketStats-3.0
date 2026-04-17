@@ -1,0 +1,10 @@
+# Use forward slashes / even on Windows to avoid errors
+path: yolo_data
+
+train: train/images
+val: val/images
+
+# Number of classes
+nc: 2
+# Names MUST match the order in your classes.txt
+names: ['Red Alliance Robot', 'Blue Alliance Robot']
