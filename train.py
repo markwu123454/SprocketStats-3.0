@@ -15,7 +15,7 @@ model = YOLO('yolo11x.pt')
 model.train(
     data='data.yaml',    
     epochs=100,
-    imgsz=1280,
+    imgsz=720,
     batch=32,          
     device=0,
     workers=8,

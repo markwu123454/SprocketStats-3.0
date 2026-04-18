@@ -2,7 +2,7 @@ import json
 import os
 
 # 1. SETTINGS
-JSON_FILE = 'project-2-at-2026-04-17-06-43-6bc53548.json'
+JSON_FILE = 'project-2-at-2026-04-17-17-58-1b35df34.json'
 OUTPUT_DIR = 'labels'
 # Match these EXACTLY to your Label Studio labels
 # The index in this list will be the number in the TXT file (0, 1, 2...)

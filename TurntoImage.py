@@ -3,7 +3,7 @@ import os
 from google.cloud import storage
 
 # --- CONFIGURATION ---
-JSON_FILE = 'project-2-at-2026-04-17-06-43-6bc53548.json'
+JSON_FILE = 'project-2-at-2026-04-17-17-58-1b35df34.json'
 OUTPUT_DIR = '.'
 CLASSES = ["Red Alliance Robot", "Blue Alliance Robot"]  # MUST match Label Studio exactly
 
