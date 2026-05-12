@@ -1,3 +1,4 @@
+#Depreciated for yolosetup.py
 """
 sample_frames.py
 ----------------

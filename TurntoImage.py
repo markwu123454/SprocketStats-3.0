@@ -1,7 +1,7 @@
 import json
 import os
 from google.cloud import storage
-
+#Depreciated for yolosetup.py
 # --- CONFIGURATION ---
 JSON_FILE = 'project-2-at-2026-04-17-17-58-1b35df34.json'
 OUTPUT_DIR = '.'

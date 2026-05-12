@@ -1,3 +1,4 @@
+#Depreciated for yolosetup.py
 """
 ls_to_yolo.py
 -------------

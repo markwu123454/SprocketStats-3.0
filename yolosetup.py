@@ -1,15 +1,18 @@
 """
-yolo_setup.py
+yolosetup.py
 ----------------
 Unified pipeline for FRC YOLO dataset preparation.
 
 Available Commands:
   1. sample   - Sample frames from local video or YouTube.
-                Usage: python yolo_setup.py sample match.mp4 --step 12
+                Usage: python yolosetup.py sample match.mp4 --step 12 (higher = fewer)
+                Usage: python yolosetup.py sample "https://www.youtube.com/watch?v=JpfRKmGhZFo" --step 30 --start 0:05 --end 2:50
+                gcloud storage cp -r "/path/to/your/folder/*" gs://sprocket3/
   2. download - Download images from GCS and convert Label Studio JSON to YOLO txt.
-                Usage: python yolo_setup.py download export.json --out-dir raw_data
+                Usage: python yolosetup.py download "export.json" --out-dir raw_data
   3. split    - Split images/labels into train and val folders.
-                Usage: python yolo_setup.py split --source-images raw_data/images --source-labels raw_data/labels
+                Usage: python yolosetup.py split --source-images raw_data/images --source-labels raw_data/labels
+                Usage: python yolosetup.py split --source-images raw_data/T-Split/images --source-labels raw_data/T-Split/labels
 """
 
 from __future__ import annotations
