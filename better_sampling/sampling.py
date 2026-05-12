@@ -40,6 +40,7 @@ from typing import Optional
 
 import dotenv
 import requests
+from tqdm import tqdm
 
 # ── Constants (not user-tunable) ─────────────────────────────────────────────
 
@@ -84,22 +85,27 @@ SESSION.headers.update({"X-TBA-Auth-Key": API_KEY})
 _etag_cache: dict[str, tuple[str, any]] = {}   # url -> (etag, data)
 
 
-def tba_get(path: str, retries: int = 3) -> Optional[any]:
+def tba_get(path: str, pbar: Optional["tqdm"] = None, retries: int = 3) -> Optional[any]:
     """GET from TBA with ETag caching and simple retry logic."""
     url = f"{TBA_BASE}{path}"
     headers = {}
     if url in _etag_cache:
         headers["If-None-Match"] = _etag_cache[url][0]
 
+    if pbar is not None:
+        pbar.set_postfix_str(path, refresh=True)
+
     for attempt in range(retries):
         try:
             resp = SESSION.get(url, headers=headers, timeout=15)
         except requests.RequestException as exc:
-            print(f"  [warn] network error ({exc}), retry {attempt+1}/{retries}")
+            tqdm.write(f"  [warn] network error ({exc}), retry {attempt+1}/{retries}")
             time.sleep(2 ** attempt)
             continue
 
         if resp.status_code == 304:                   # Not Modified
+            if pbar is not None:
+                pbar.update(1)
             return _etag_cache[url][1]
         if resp.status_code == 200:
             data = resp.json()
@@ -107,16 +113,22 @@ def tba_get(path: str, retries: int = 3) -> Optional[any]:
             if etag:
                 _etag_cache[url] = (etag, data)
             time.sleep(REQUEST_DELAY)
+            if pbar is not None:
+                pbar.update(1)
             return data
         if resp.status_code == 404:
+            if pbar is not None:
+                pbar.update(1)
             return None
         if resp.status_code == 429:
             wait = int(resp.headers.get("Retry-After", 5))
-            print(f"  [warn] rate-limited, sleeping {wait}s")
+            tqdm.write(f"  [warn] rate-limited, sleeping {wait}s")
             time.sleep(wait)
             continue
 
-        print(f"  [warn] HTTP {resp.status_code} for {path}")
+        tqdm.write(f"  [warn] HTTP {resp.status_code} for {path}")
+        if pbar is not None:
+            pbar.update(1)
         return None
 
     return None
@@ -159,9 +171,9 @@ def week_label(event: dict) -> Optional[str]:
 
 # ── Match fetching ────────────────────────────────────────────────────────────
 
-def fetch_matches(event_key: str) -> list[dict]:
+def fetch_matches(event_key: str, pbar: Optional["tqdm"] = None) -> list[dict]:
     """Fetch and filter matches for an event to qual/semi/finals only."""
-    matches = tba_get(f"/event/{event_key}/matches") or []
+    matches = tba_get(f"/event/{event_key}/matches", pbar=pbar) or []
     return [m for m in matches if m.get("comp_level") in {"qm", "sf", "f"}]
 
 
@@ -184,7 +196,7 @@ def make_record(m: dict, event: dict) -> dict:
 
 # ── Main sampling logic ───────────────────────────────────────────────────────
 
-def build_strata(years: list[int]) -> dict[str, list[dict]]:
+def build_strata(years: list[int], pbar: Optional["tqdm"] = None) -> dict[str, list[dict]]:
     """
     Fetch all events for each year and bin them into strata.
     Returns { stratum_key: [event, ...] }
@@ -192,8 +204,7 @@ def build_strata(years: list[int]) -> dict[str, list[dict]]:
     strata: dict[str, list[dict]] = defaultdict(list)
 
     for year in years:
-        print(f"  Fetching events for {year}…")
-        events = tba_get(f"/events/{year}") or []
+        events = tba_get(f"/events/{year}", pbar=pbar) or []
         for ev in events:
             label = week_label(ev)
             if label is None:
@@ -216,12 +227,13 @@ def srs_matches(
     n: int,
     rng: random.Random,
     extra_matches: Optional[list[dict]] = None,
+    pbar: Optional["tqdm"] = None,
 ) -> list[dict]:
     """
     Fetch all matches for an event, optionally append extra_matches (folded
     finals), SRS n of them, and return slim records.
     """
-    matches = fetch_matches(event["key"])
+    matches = fetch_matches(event["key"], pbar=pbar)
     if extra_matches:
         matches = matches + extra_matches
     if not matches:
@@ -237,43 +249,23 @@ def sample_dcmp_stratum(
     n_events: int,
     n_matches: int,
     rng: random.Random,
-    year: int,
+    pbar: Optional["tqdm"] = None,
 ) -> list[dict]:
     """
     Handle one {year}_dcmp stratum:
-      1. Fetch match counts for all events.
-      2. Separate into divisions (≥ DCMP_MIN_MATCHES) and finals (< DCMP_MIN_MATCHES).
-      3. Drop finals events — too few matches to sample meaningfully.
-      4. Cluster-sample n_events divisions, then SRS n_matches from each.
+      1. Cluster-sample n_events events.
+      2. Fetch matches for each; skip any with fewer than DCMP_MIN_MATCHES
+         (these are finals events with too few matches to sample meaningfully).
+      3. SRS n_matches from each qualifying event.
     """
-    # ── Step 1: fetch match lists for every dcmp event ────────────────────────
-    event_matches: dict[str, list[dict]] = {}
-    for ev in events:
-        ekey = ev["key"]
-        event_matches[ekey] = fetch_matches(ekey)
-
-    # ── Step 2: split into divisions and finals ───────────────────────────────
-    divisions = [ev for ev in events if len(event_matches[ev["key"]]) >= DCMP_MIN_MATCHES]
-    finals    = [ev for ev in events if len(event_matches[ev["key"]]) <  DCMP_MIN_MATCHES]
-
-    if finals:
-        print(f"  [{year}_dcmp] Dropping {len(finals)} finals event(s) with fewer than {DCMP_MIN_MATCHES} matches:")
-        for fev in finals:
-            fkey = fev["key"]
-            print(f"    {fkey} ({len(event_matches[fkey])} matches) → dropped")
-
-    # ── Step 3: cluster-sample divisions, then SRS matches ───────────────────
-    sampled_divisions = cluster_sample_events(divisions, n_events, rng)
+    sampled_events = cluster_sample_events(events, n_events, rng)
     records: list[dict] = []
-    for ev in sampled_divisions:
-        ekey  = ev["key"]
-        ename = ev.get("name", ekey)
-        pool  = event_matches[ekey]
-        print(f"  [{year}_dcmp] Event: {ename} ({ekey})  pool={len(pool)} matches")
-        sampled = pool[:] if len(pool) <= n_matches else rng.sample(pool, n_matches)
-        batch = [make_record(m, ev) for m in sampled]
-        print(f"         → {len(batch)} match(es) sampled")
-        records.extend(batch)
+    for ev in sampled_events:
+        matches = fetch_matches(ev["key"], pbar=pbar)
+        if len(matches) < DCMP_MIN_MATCHES:
+            continue
+        sampled = matches[:] if len(matches) <= n_matches else rng.sample(matches, n_matches)
+        records.extend(make_record(m, ev) for m in sampled)
 
     return records
 
@@ -286,16 +278,13 @@ def sample_stratum(
     n_events: int,
     n_matches: int,
     rng: random.Random,
+    pbar: Optional["tqdm"] = None,
 ) -> list[dict]:
     """Cluster + SRS for a non-dcmp stratum."""
     sampled_events = cluster_sample_events(events, n_events, rng)
     records: list[dict] = []
     for ev in sampled_events:
-        ekey  = ev["key"]
-        ename = ev.get("name", ekey)
-        print(f"  [{key}] Event: {ename} ({ekey})")
-        matches = srs_matches(ev, n_matches, rng)
-        print(f"         → {len(matches)} match(es) sampled")
+        matches = srs_matches(ev, n_matches, rng, pbar=pbar)
         records.extend(matches)
     return records
 
@@ -314,8 +303,15 @@ def sample_all(
     """
     rng = random.Random(seed)
 
-    print("\n=== Step 1: Building strata (year × week) ===")
-    strata = build_strata(years)
+    # Estimate total API calls:
+    #   - 1 per year for /events/{year}
+    #   - per stratum: n_events events × 1 call each for matches
+    #   - dcmp strata also fetch ALL events to count matches first
+    n_strata = len(years) * (len(COMP_WEEKS) + 2)   # rough upper bound
+    estimated_calls = len(years) + n_strata * n_events
+    pbar = tqdm(total=estimated_calls, desc="TBA requests", unit="req")
+
+    strata = build_strata(years, pbar=pbar)
 
     # Sort strata so they appear in chronological order:
     # w1..w7 numerically, then dcmp, then cmp — within each year.
@@ -328,28 +324,26 @@ def sample_all(
         return (int(year), order.get(label, 99))
 
     all_keys = sorted(strata.keys(), key=sort_key)
-    print(f"  Found {len(all_keys)} strata with events:")
-    for k in all_keys:
-        print(f"    {k}: {len(strata[k])} events")
 
     records: list[dict] = []
     stratum_counts: dict[str, int] = {}
 
-    print(f"\n=== Step 2 & 3: Cluster-sample {n_events} events, SRS {n_matches} matches ===")
     for key in all_keys:
         year_str, label = key.split("_", 1)
         year = int(year_str)
 
         if label == "dcmp":
             batch = sample_dcmp_stratum(
-                strata[key], n_events, n_matches, rng, year
+                strata[key], n_events, n_matches, rng, pbar=pbar
             )
         else:
-            batch = sample_stratum(key, strata[key], n_events, n_matches, rng)
+            batch = sample_stratum(key, strata[key], n_events, n_matches, rng, pbar=pbar)
 
         records.extend(batch)
         stratum_counts[key] = len(batch)
 
+    pbar.set_postfix_str("done", refresh=True)
+    pbar.close()
     return records, stratum_counts
 
 
@@ -425,7 +419,6 @@ def report_match_types(records: list[dict]) -> None:
         n     = by_level[code]
         label = COMP_LEVEL_LABELS.get(code, code)
         print(f"  {label:<22} {code:<6} {n:>8}  {_pct(n, total):>7}")
-    print(f"  {'TOTAL':<22} {'':6} {total:>8}  {'100.0%':>7}")
 
 
 # ── Summary (strata counts + representation reports) ─────────────────────────
@@ -443,7 +436,7 @@ def summarise(stratum_counts: dict[str, int], records: list[dict]) -> None:
     report_match_types(records)
 
 
-def save_results(records: list[dict], path: str = "better_sampled_matches.json") -> None:
+def save_results(records: list[dict], path: str = "matches.json") -> None:
     # Strip internal-only fields before writing so the output schema stays stable.
     output = [
         {
@@ -466,16 +459,16 @@ if __name__ == "__main__":
     YEARS = list(range(2022, 2027))          # [2022, 2023, 2024, 2025, 2026]
 
     # How many events to cluster-sample per stratum (year × week)
-    N_EVENTS = 2
+    N_EVENTS = 3
 
     # How many matches to SRS per sampled event
-    N_MATCHES = 3
+    N_MATCHES = 5
 
     # Reproducibility seed — change to get a different random draw
-    SEED = 422
+    SEED = 37
 
     # Where to write the output JSON
-    OUTPUT_PATH = "better_sampled_matches.json"
+    OUTPUT_PATH = "matches.json"
 
     # ── Run ───────────────────────────────────────────────────────────────────
 
@@ -484,11 +477,8 @@ if __name__ == "__main__":
     print(f"  Events/stratum  : {N_EVENTS}")
     print(f"  Matches/event   : {N_MATCHES}")
     print(f"  Random seed     : {SEED}")
-    print(f"  Est. matches    : ~{len(YEARS) * N_EVENTS * N_MATCHES}")
+    print(f"  Est. matches    : ~{len(YEARS) * (len(COMP_WEEKS) + 2) * N_EVENTS * N_MATCHES}")
 
     records, stratum_counts = sample_all(YEARS, N_EVENTS, N_MATCHES, SEED)
     summarise(stratum_counts, records)
     save_results(records, OUTPUT_PATH)
-
-    if records:
-        print(f"\nFirst record: {json.dumps({'match_key': records[0]['match_key'], 'videos': records[0]['videos']}, indent=2)}")
