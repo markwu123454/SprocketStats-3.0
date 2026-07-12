@@ -39,21 +39,19 @@ Label Studio ───────┘
 
 ```bash
 pip install label-studio-sdk boto3 timm scipy opencv-python-headless \
-            torch torchvision pyyaml numpy python-dotenv
+            torch torchvision pyyaml numpy
 ```
 
-Copy `.env.example` to `.env` (next to `config.yaml`) and fill in your
-credentials. The scripts load it automatically via python-dotenv:
+Set environment variables (never commit these):
 
-```
-LS_API_KEY=...                 # LS personal access token
-R2_ENDPOINT_URL=https://<accountid>.r2.cloudflarestorage.com
-R2_ACCESS_KEY_ID=...
-R2_SECRET_ACCESS_KEY=...
+```bash
+export LS_API_KEY=...              # LS personal access token
+export R2_ENDPOINT_URL=https://<accountid>.r2.cloudflarestorage.com
+export R2_ACCESS_KEY_ID=...
+export R2_SECRET_ACCESS_KEY=...
 ```
 
-Add `.env` to `.gitignore`. Edit `config.yaml` for bucket, local paths, and
-`val_season`.
+Edit `config.yaml` for bucket name, local paths, and `val_season`.
 
 ### Step 1 — pull labels + images
 
