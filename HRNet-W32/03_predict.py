@@ -136,7 +136,6 @@ def main():
         results, avg = to_ls_results(dets)
         client.predictions.create(
             task=task.id,
-            project=LS["project_id"],
             model_version=LS["model_version"],
             score=avg,
             result=results,

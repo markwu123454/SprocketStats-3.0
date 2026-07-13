@@ -40,16 +40,17 @@ heatmap:
   max_instances: 20          # up to 18 robots in a 3-way split-screen + slack
 
 train:
-  backbone: "hrnet_w18"     # still worth the swap, smaller head to overfit
-  batch_size: 4
-  grad_accum: 2              # was 6, more steps per epoch on 151 train images
-  epochs: 100                 # was 80
-  base_lr: 0.0003             # was 0.0005
-  weight_decay: 0.0005         # was 0.0001, moderate since backbone is frozen early
-  val_frac: 0.20
+  backbone: "hrnet_w32"
+  batch_size: 4             # per-step batch that fits 16GB at 768x768 (HRNet
+                           # keeps hi-res feature maps, so activations are huge)
+  grad_accum: 6            # accumulate 6 steps => effective batch of 24
+  epochs: 80
+  base_lr: 0.0005
+  weight_decay: 0.0001
+  num_workers: 8
+  val_frac: 0.15            # fraction of MATCHES held out for validation
   seed: 42
-  amp: true
-  num_workers: 2
+  amp: true                  # mixed precision
 
 paths:
   work_dir: "data/frc/work"

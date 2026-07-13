@@ -96,15 +96,24 @@ class FRCKeypointDataset(Dataset):
         return len(self.items)
 
     def _augment(self, img, pts):
-        # Horizontal flip SWAPS alliance color? No — alliance is not a
-        # left/right property of the robot, so flip is geometry-only and
-        # must NOT swap classes. Flip pixels + x coords, keep cls.
         if np.random.rand() < 0.5:
             img = img[:, ::-1, :]
             W = img.shape[1]
             for p in pts:
                 p["x_px"] = W - 1 - p["x_px"]
-        # mild brightness/contrast jitter for broadcast lighting variation
+        # random scale + crop, helps a lot at this data size
+        if np.random.rand() < 0.7:
+            H, W = img.shape[:2]
+            scale = np.random.uniform(0.8, 1.0)
+            ch, cw = int(H * scale), int(W * scale)
+            y0 = np.random.randint(0, H - ch + 1)
+            x0 = np.random.randint(0, W - cw + 1)
+            img = img[y0:y0 + ch, x0:x0 + cw]
+            for p in pts:
+                p["x_px"] -= x0
+                p["y_px"] -= y0
+            # drop points that fell outside the crop
+            pts = [p for p in pts if 0 <= p["x_px"] < cw and 0 <= p["y_px"] < ch]
         if np.random.rand() < 0.5:
             a = 1.0 + np.random.uniform(-0.2, 0.2)
             b = np.random.uniform(-15, 15)

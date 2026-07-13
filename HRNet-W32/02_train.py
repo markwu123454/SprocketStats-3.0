@@ -144,9 +144,11 @@ def main():
         )
 
     tl = DataLoader(tr, batch_size=T["batch_size"], shuffle=True,
-                    num_workers=T["num_workers"], pin_memory=True, drop_last=True)
+                    num_workers=T["num_workers"], pin_memory=True, drop_last=True,
+                persistent_workers=T["num_workers"] > 0)
     vl = DataLoader(va, batch_size=T["batch_size"], shuffle=False,
-                    num_workers=T["num_workers"], pin_memory=True)
+                    num_workers=T["num_workers"], pin_memory=True,
+                persistent_workers=T["num_workers"] > 0)
 
     model = HeatmapNet(T["backbone"], len(CLASSES), HM["output_stride"]).to(DEVICE)
     opt = torch.optim.AdamW(model.parameters(), lr=T["base_lr"],
