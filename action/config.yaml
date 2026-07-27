@@ -1,0 +1,33 @@
+# ============================================================
+# Per-robot action-classification pipeline — central config
+# ============================================================
+# Downstream of MTMCT (../mtmct/), not of HRNet-W32 — this pipeline only
+# consumes finished (x_frac, y_frac, label) track sequences, no images, no
+# vision backbone. Kept as its own config/deps/checkpoints so it can be
+# retrained or redeployed without dragging in HRNet or the tracker's env.
+
+paths:
+  manifest: "data/exports/action_manifest.jsonl"
+  checkpoints: "data/checkpoints"
+
+action:
+  # Frame classification of what each robot is doing, per timestep.
+  classes: [traveling, intake, scoring, defense, defended, idle]
+  ignore_label: "unknown"    # frames with no human label; excluded from loss
+  fps: 20                    # manifest frame rate (matches the sped-up HRNet run, 10-30fps)
+  window_sec: 4.0            # training window length
+  stride_sec: 1.0            # training window sampling stride (overlapping, for augmentation)
+  eval_window_sec: 4.0
+  eval_overlap_sec: 2.0      # overlap-average stitching at eval time
+  relational_k_teammates: 2  # closest-K other robots, same alliance
+  relational_k_opponents: 3  # closest-K other robots, opposing alliance
+  hidden_size: 128
+  num_layers: 2
+  bidirectional: true        # offline analysis, not live -> future context is free signal
+  dropout: 0.2
+  batch_size: 16
+  epochs: 60
+  base_lr: 0.0005
+  weight_decay: 0.0001
+  val_frac: 0.15             # fraction of MATCHES held out for validation
+  seed: 42
