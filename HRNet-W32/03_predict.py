@@ -89,7 +89,7 @@ def to_ls_results(dets, orig_w, orig_h):
             "original_height": orig_h,
         })
         scores.append(score)
-    avg = float(np.mean(scores)) if scores else 0.0
+    avg = float(np.min(scores)) if scores else 0.0
     return results, avg
 
 

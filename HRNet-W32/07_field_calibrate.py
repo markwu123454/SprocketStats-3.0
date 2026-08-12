@@ -215,12 +215,13 @@ class Calibrator:
     PAD_FRAC = 0.15          # extra margin shown around the field in the undistorted view
 
     def __init__(self, video_path, model, hm, threshold, year, field_w_in, field_l_in,
-                 builtin_elements, field_image_path=None):
+                 builtin_elements, field_image_path=None, youtube_url=None):
         self.video_path = video_path
         self.model, self.hm, self.threshold = model, hm, threshold
         self.year = year
         self.field_w_in, self.field_l_in = field_w_in, field_l_in
         self.calib_path = calib_path_for(video_path)
+        self.youtube_url = youtube_url
 
         long_in, short_in = max(field_w_in, field_l_in), min(field_w_in, field_l_in)
         self.canvas_w = 700
@@ -347,6 +348,7 @@ class Calibrator:
             "field_length_in": self.field_l_in,
             "field_image": str(self.field_img_path) if self.field_img_path else None,
             "corners": self.corners,
+            "youtube_url": self.youtube_url,
         }
         self.calib_path.write_text(json.dumps(data, indent=2))
         self.status.config(text=f"saved calibration -> {self.calib_path.name}")
@@ -718,6 +720,7 @@ def main():
         print("[warn] tkinterdnd2 not installed -- drag-and-drop disabled, "
               "use the 'Load field image' button instead (pip install tkinterdnd2)")
 
+    youtube_url = args.video if is_url(args.video) else None
     video_path = download_video(args.video, args.cookies) if is_url(args.video) else pathlib.Path(args.video)
     if not video_path.exists():
         raise SystemExit(f"[abort] video not found: {video_path}")
@@ -734,7 +737,8 @@ def main():
     print(f"[field] year={args.year} dims={field_w_in:.1f}x{field_l_in:.1f}in")
 
     Calibrator(video_path, model, hm, threshold, args.year, field_w_in, field_l_in,
-               builtin_elements, field_image_path=args.field_image).run()
+               builtin_elements, field_image_path=args.field_image,
+               youtube_url=youtube_url).run()
 
 
 if __name__ == "__main__":
