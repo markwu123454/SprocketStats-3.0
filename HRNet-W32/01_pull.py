@@ -189,6 +189,8 @@ def parse_points(task: dict):
         v = r["value"]
         W = W or r.get("original_width")
         H = H or r.get("original_height")
+        if "x" not in v or "y" not in v:
+            continue
         labels = v.get("keypointlabels", [])
         if not labels:
             continue

@@ -33,20 +33,22 @@ classes:
 heatmap:
   input_size: [768, 768]     # network input (H, W). High-res for small points.
   output_stride: 4           # heatmap is input/stride => 192x192
-  sigma: 2.0                 # Gaussian spread of target peak, in heatmap px
+  sigma: 2.5                 # slightly wider target; reduces brittle narrow-peak failures
   # Peak decoding at inference
-  peak_threshold: 0.3        # min heatmap value to accept a detection
+  peak_threshold: 0.35       # raised from 0.3; precision was consistently below recall
   nms_kernel: 5              # local-max window (px in heatmap space)
   max_instances: 20          # up to 18 robots in a 3-way split-screen + slack
 
 train:
-  backbone: "hrnet_w18"     # still worth the swap, smaller head to overfit
+  backbone: "hrnet_w18"
   batch_size: 4
-  grad_accum: 2              # was 6, more steps per epoch on 151 train images
-  epochs: 100                 # was 80
-  base_lr: 0.0003             # was 0.0005
-  weight_decay: 0.0005         # was 0.0001, moderate since backbone is frozen early
-  val_frac: 0.20
+  grad_accum: 4              # effective batch 16; more stable gradients on 241 frames
+  epochs: 150                # ~36 steps/epoch => 5400 total optimizer steps
+  base_lr: 0.0002            # conservative; small dataset can't absorb large LR spikes
+  weight_decay: 0.0005
+  val_frac: 0.15             # keeps ~205 train frames vs 36 val (match-level holdout)
+  freeze_backbone_epochs: 15 # train head-only first to avoid clobbering pretrained features
+  backbone_lr_scale: 0.2     # backbone fine-tunes at 1/5 of head LR after unfreeze
   seed: 42
   amp: true
   num_workers: 2

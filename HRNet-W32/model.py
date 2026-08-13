@@ -96,15 +96,33 @@ class FRCKeypointDataset(Dataset):
         return len(self.items)
 
     def _augment(self, img, pts):
+        # horizontal flip
         if np.random.rand() < 0.5:
             img = img[:, ::-1, :]
             W = img.shape[1]
             for p in pts:
                 p["x_px"] = W - 1 - p["x_px"]
-        # random scale + crop, helps a lot at this data size
-        if np.random.rand() < 0.7:
+
+        # small rotation (camera is mostly overhead but not perfectly level)
+        if np.random.rand() < 0.5:
             H, W = img.shape[:2]
-            scale = np.random.uniform(0.8, 1.0)
+            angle = np.random.uniform(-12, 12)
+            cx, cy = W / 2, H / 2
+            M = cv2.getRotationMatrix2D((cx, cy), angle, 1.0)
+            img = cv2.warpAffine(img, M, (W, H), flags=cv2.INTER_LINEAR,
+                                 borderMode=cv2.BORDER_REFLECT_101)
+            ones = np.ones((len(pts), 1))
+            coords = np.array([[p["x_px"], p["y_px"]] for p in pts]) if pts else np.zeros((0, 2))
+            if len(coords):
+                rot = (M[:, :2] @ coords.T + M[:, 2:]).T
+                for p, (rx, ry) in zip(pts, rot):
+                    p["x_px"], p["y_px"] = float(rx), float(ry)
+            pts = [p for p in pts if 0 <= p["x_px"] < W and 0 <= p["y_px"] < H]
+
+        # random scale + crop — wider range helps small dataset generalise across zoom levels
+        if np.random.rand() < 0.75:
+            H, W = img.shape[:2]
+            scale = np.random.uniform(0.60, 1.0)
             ch, cw = int(H * scale), int(W * scale)
             y0 = np.random.randint(0, H - ch + 1)
             x0 = np.random.randint(0, W - cw + 1)
@@ -112,12 +130,21 @@ class FRCKeypointDataset(Dataset):
             for p in pts:
                 p["x_px"] -= x0
                 p["y_px"] -= y0
-            # drop points that fell outside the crop
             pts = [p for p in pts if 0 <= p["x_px"] < cw and 0 <= p["y_px"] < ch]
-        if np.random.rand() < 0.5:
-            a = 1.0 + np.random.uniform(-0.2, 0.2)
-            b = np.random.uniform(-15, 15)
+
+        # color: brightness + contrast
+        if np.random.rand() < 0.6:
+            a = 1.0 + np.random.uniform(-0.3, 0.3)
+            b = np.random.uniform(-20, 20)
             img = np.clip(img.astype(np.float32) * a + b, 0, 255).astype(np.uint8)
+
+        # saturation jitter (convert to HSV, perturb S channel)
+        if np.random.rand() < 0.5:
+            hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV).astype(np.float32)
+            hsv[:, :, 1] *= np.random.uniform(0.6, 1.4)
+            hsv[:, :, 1] = np.clip(hsv[:, :, 1], 0, 255)
+            img = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2RGB)
+
         return img, pts
 
     def __getitem__(self, idx):

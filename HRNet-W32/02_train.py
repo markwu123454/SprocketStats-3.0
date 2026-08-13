@@ -119,6 +119,17 @@ def evaluate(model, loader, out_stride, tol_frac=0.02):
     return {"precision": prec, "recall": rec, "f1": f1}
 
 
+def _atomic_save(obj, dst):
+    """Write to a temp file then rename — avoids Windows file-lock errors on last.pt."""
+    import pathlib
+    dst = pathlib.Path(dst)
+    tmp = dst.with_suffix(".tmp")
+    torch.save(obj, tmp)
+    if dst.exists():
+        dst.unlink()
+    tmp.rename(dst)
+
+
 def main():
     manifest = _p(P["export_dir"]) / "manifest.jsonl"
     records = load_records(manifest)
@@ -151,9 +162,31 @@ def main():
                 persistent_workers=T["num_workers"] > 0)
 
     model = HeatmapNet(T["backbone"], len(CLASSES), HM["output_stride"]).to(DEVICE)
-    opt = torch.optim.AdamW(model.parameters(), lr=T["base_lr"],
-                            weight_decay=T["weight_decay"])
-    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T["epochs"])
+    freeze_epochs = T.get("freeze_backbone_epochs", 0)
+
+    def _set_backbone_grad(requires_grad: bool):
+        for p in model.backbone.parameters():
+            p.requires_grad_(requires_grad)
+
+    backbone_lr_scale = T.get("backbone_lr_scale", 0.2)  # backbone fine-tunes slower
+
+    if freeze_epochs > 0:
+        _set_backbone_grad(False)
+        print(f"[train] backbone frozen for first {freeze_epochs} epochs")
+
+    def _make_optimizer():
+        head_params = [p for p in model.head.parameters() if p.requires_grad]
+        bb_params   = [p for p in model.backbone.parameters() if p.requires_grad]
+        groups = [{"params": head_params, "lr": T["base_lr"]}]
+        if bb_params:
+            groups.append({"params": bb_params, "lr": T["base_lr"] * backbone_lr_scale})
+        return torch.optim.AdamW(groups, weight_decay=T["weight_decay"])
+
+    opt = _make_optimizer()
+    # ReduceLROnPlateau reacts to val F1 plateaus — far better than fixed cosine
+    # for small datasets where the optimum arrives at an unpredictable epoch.
+    sched = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        opt, mode="max", factor=0.5, patience=8, min_lr=1e-6)
     use_amp = T["amp"] and DEVICE == "cuda"
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
@@ -161,6 +194,15 @@ def main():
     best_f1 = -1.0
     accum = max(1, T.get("grad_accum", 1))
     for epoch in range(T["epochs"]):
+        if freeze_epochs > 0 and epoch == freeze_epochs:
+            _set_backbone_grad(True)
+            # Rebuild optimizer with two param groups: head at full LR, backbone at scaled LR.
+            # Reset scheduler so patience counter starts fresh from the unfrozen baseline.
+            opt = _make_optimizer()
+            sched = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                opt, mode="max", factor=0.5, patience=8, min_lr=1e-6)
+            print(f"[train] backbone unfrozen at epoch {epoch} "
+                  f"(head_lr={T['base_lr']:.2e}, bb_lr={T['base_lr']*backbone_lr_scale:.2e})")
         model.train()
         running = 0.0
         opt.zero_grad(set_to_none=True)
@@ -182,16 +224,17 @@ def main():
         if len(tl) % accum != 0:
             scaler.step(opt); scaler.update()
             opt.zero_grad(set_to_none=True)
-        sched.step()
-
         m = evaluate(model, vl, HM["output_stride"])
-        print(f"[val] epoch {epoch}: P={m['precision']:.3f} R={m['recall']:.3f} F1={m['f1']:.3f}")
-        torch.save({"model": model.state_dict(), "epoch": epoch, "cfg": CFG},
-                   ckpt_dir / "last.pt")
+        sched.step(m["f1"])
+        lrs = [pg["lr"] for pg in opt.param_groups]
+        lr_str = "/".join(f"{lr:.2e}" for lr in lrs)
+        print(f"[val] epoch {epoch}: P={m['precision']:.3f} R={m['recall']:.3f} F1={m['f1']:.3f}  lr={lr_str}")
+        _atomic_save({"model": model.state_dict(), "epoch": epoch, "cfg": CFG},
+                     ckpt_dir / "last.pt")
         if m["f1"] > best_f1:
             best_f1 = m["f1"]
-            torch.save({"model": model.state_dict(), "epoch": epoch, "cfg": CFG},
-                       ckpt_dir / "best.pt")
+            _atomic_save({"model": model.state_dict(), "epoch": epoch, "cfg": CFG},
+                         ckpt_dir / "best.pt")
             print(f"  * new best F1={best_f1:.3f}")
 
     print(f"[done] best val F1={best_f1:.3f}")
