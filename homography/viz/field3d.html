@@ -1,0 +1,342 @@
+<title>Field 3D</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0d1117;overflow:hidden;font:11px/1.6 monospace;color:#4a6a52}
+canvas{display:block;cursor:grab}
+#hud{position:fixed;bottom:10px;left:12px;pointer-events:none;user-select:none}
+#tt{position:fixed;display:none;background:#0a1410;border:1px solid #1c3a24;padding:6px 10px;pointer-events:none;color:#9dbfa6;line-height:1.7;white-space:nowrap}
+</style>
+<canvas id="c"></canvas>
+<div id="hud">drag: orbit &nbsp; shift-drag / right-drag: pan &nbsp; scroll: zoom</div>
+<div id="tt"></div>
+<script>
+const DATA = {
+  field: { length: 16.541, width: 8.069 },
+  tags: [
+    {id:1, x:11.878,y:7.425,z:0.889,nx:-1.0, ny:0.0},
+    {id:2, x:11.915,y:4.638,z:1.124,nx:-0.0, ny:1.0},
+    {id:3, x:11.312,y:4.39,z:1.124,nx:-1.0, ny:0.0},
+    {id:4, x:11.312,y:4.035,z:1.124,nx:-1.0, ny:0.0},
+    {id:5, x:11.915,y:3.431,z:1.124,nx:-0.0, ny:-1.0},
+    {id:6, x:11.878,y:0.644,z:0.889,nx:-1.0, ny:0.0},
+    {id:7, x:11.953,y:0.644,z:0.889,nx:1.0, ny:0.0},
+    {id:8, x:12.271,y:3.431,z:1.124,nx:-0.0, ny:-1.0},
+    {id:9, x:12.519,y:3.679,z:1.124,nx:1.0, ny:0.0},
+    {id:10, x:12.519,y:4.035,z:1.124,nx:1.0, ny:0.0},
+    {id:11, x:12.271,y:4.638,z:1.124,nx:-0.0, ny:1.0},
+    {id:12, x:11.953,y:7.425,z:0.889,nx:1.0, ny:0.0},
+    {id:13, x:16.533,y:7.403,z:0.552,nx:-1.0, ny:0.0},
+    {id:14, x:16.533,y:6.972,z:0.552,nx:-1.0, ny:0.0},
+    {id:15, x:16.533,y:4.324,z:0.552,nx:-1.0, ny:0.0},
+    {id:16, x:16.533,y:3.892,z:0.552,nx:-1.0, ny:0.0},
+    {id:17, x:4.663,y:0.644,z:0.889,nx:1.0, ny:0.0},
+    {id:18, x:4.626,y:3.431,z:1.124,nx:-0.0, ny:-1.0},
+    {id:19, x:5.229,y:3.679,z:1.124,nx:1.0, ny:0.0},
+    {id:20, x:5.229,y:4.035,z:1.124,nx:1.0, ny:0.0},
+    {id:21, x:4.626,y:4.638,z:1.124,nx:-0.0, ny:1.0},
+    {id:22, x:4.663,y:7.425,z:0.889,nx:1.0, ny:0.0},
+    {id:23, x:4.588,y:7.425,z:0.889,nx:-1.0, ny:0.0},
+    {id:24, x:4.27,y:4.638,z:1.124,nx:-0.0, ny:1.0},
+    {id:25, x:4.022,y:4.39,z:1.124,nx:-1.0, ny:0.0},
+    {id:26, x:4.022,y:4.035,z:1.124,nx:-1.0, ny:0.0},
+    {id:27, x:4.27,y:3.431,z:1.124,nx:-0.0, ny:-1.0},
+    {id:28, x:4.588,y:0.644,z:0.889,nx:-1.0, ny:0.0},
+    {id:29, x:0.008,y:0.666,z:0.552,nx:1.0, ny:0.0},
+    {id:30, x:0.008,y:1.098,z:0.552,nx:1.0, ny:0.0},
+    {id:31, x:0.008,y:3.746,z:0.552,nx:1.0, ny:0.0},
+    {id:32, x:0.008,y:4.178,z:0.552,nx:1.0, ny:0.0}
+  ],
+  cameras: [
+    { name:"main", x:8.452, y:-5.978, z:3.396, yaw:91.5, pitch:28.71, rms:4.36, color:"#00ccff",
+      detected:[5, 6, 8, 15, 16, 17, 18, 27, 31, 32],
+      residuals:{5:{reproj_px:4.79,dist_m:10.28},6:{reproj_px:1.23,dist_m:7.87},8:{reproj_px:3.84,dist_m:10.41},15:{reproj_px:2.28,dist_m:13.4},16:{reproj_px:2.41,dist_m:13.07},17:{reproj_px:3.01,dist_m:8.03},18:{reproj_px:7.39,dist_m:10.41},27:{reproj_px:6.68,dist_m:10.54},31:{reproj_px:4.03,dist_m:13.19},32:{reproj_px:2.46,dist_m:13.51}} },
+    { name:"bot_left", x:-1.871, y:-2.637, z:0.838, yaw:47.89, pitch:-0.74, rms:1.243, color:"#39e588",
+      detected:[18, 26, 27, 28],
+      residuals:{18:{reproj_px:0.53,dist_m:8.89},26:{reproj_px:1.09,dist_m:8.91},27:{reproj_px:1.24,dist_m:8.64},28:{reproj_px:1.66,dist_m:7.24}} },
+    { name:"bot_right", x:16.369, y:-0.714, z:0.66, yaw:120.88, pitch:-4.26, rms:0.549, color:"#ff7744",
+      detected:[5, 8, 9, 10],
+      residuals:{5:{reproj_px:0.47,dist_m:6.1},8:{reproj_px:0.47,dist_m:5.85},9:{reproj_px:0.62,dist_m:5.86},10:{reproj_px:0.48,dist_m:6.13}} }
+  ]
+};
+
+// ── camera state ─────────────────────────────────────────────────────────────
+const cam = { az:210, el:28, dist:22, tx:8.27, ty:4.03, tz:1.5 };
+
+const canvas = document.getElementById('c');
+const ctx    = canvas.getContext('2d');
+const tt     = document.getElementById('tt');
+
+function resize(){ canvas.width=innerWidth; canvas.height=innerHeight; render(); }
+
+// ── math ─────────────────────────────────────────────────────────────────────
+function dot(a,b){ return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]; }
+function cross(a,b){ return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]; }
+function norm(a){ const l=Math.hypot(...a); return l<1e-9?[0,0,1]:a.map(x=>x/l); }
+function sub(a,b){ return [a[0]-b[0],a[1]-b[1],a[2]-b[2]]; }
+function add(a,b){ return [a[0]+b[0],a[1]+b[1],a[2]+b[2]]; }
+function scale(a,s){ return a.map(x=>x*s); }
+
+function getView(){
+  const azR=cam.az*Math.PI/180, elR=cam.el*Math.PI/180;
+  const pos=[cam.tx+cam.dist*Math.cos(elR)*Math.cos(azR),
+             cam.ty+cam.dist*Math.cos(elR)*Math.sin(azR),
+             cam.tz+cam.dist*Math.sin(elR)];
+  const fwd=norm(sub([cam.tx,cam.ty,cam.tz],pos));
+  const right=norm(cross(fwd,[0,0,1]));
+  const up=cross(right,fwd);
+  return {pos,fwd,right,up};
+}
+
+const FOV_F = ()=> canvas.height/(2*Math.tan(55*Math.PI/360));
+
+function proj(pt, v){
+  const d=sub(pt,v.pos);
+  const vz=dot(d,v.fwd);
+  if(vz<0.05) return null;
+  const vx=dot(d,v.right), vy=dot(d,v.up);
+  const f=FOV_F();
+  return [canvas.width/2+vx/vz*f, canvas.height/2-vy/vz*f, vz];
+}
+
+// ── draw primitives ───────────────────────────────────────────────────────────
+function line3(a,b,col,lw,v,dash){
+  const pa=proj(a,v), pb=proj(b,v);
+  if(!pa||!pb) return;
+  ctx.save(); ctx.strokeStyle=col; ctx.lineWidth=lw;
+  if(dash) ctx.setLineDash(dash); else ctx.setLineDash([]);
+  ctx.beginPath(); ctx.moveTo(pa[0],pa[1]); ctx.lineTo(pb[0],pb[1]); ctx.stroke();
+  ctx.restore();
+}
+
+function poly3(pts,fillCol,strokeCol,lw,v){
+  const pp=pts.map(p=>proj(p,v));
+  if(pp.some(p=>!p)) return;
+  ctx.save();
+  ctx.beginPath(); ctx.moveTo(pp[0][0],pp[0][1]);
+  for(let i=1;i<pp.length;i++) ctx.lineTo(pp[i][0],pp[i][1]);
+  ctx.closePath();
+  if(fillCol){ctx.fillStyle=fillCol;ctx.fill();}
+  if(strokeCol){ctx.strokeStyle=strokeCol;ctx.lineWidth=lw;ctx.stroke();}
+  ctx.restore();
+  return pp.reduce((s,p)=>s+p[2],0)/pp.length;
+}
+
+function label3(pt,text,col,bold,v){
+  const p=proj(pt,v); if(!p) return;
+  ctx.save(); ctx.fillStyle=col;
+  ctx.font=(bold?'bold ':'')+`10px monospace`;
+  ctx.textAlign='center'; ctx.fillText(text,p[0],p[1]); ctx.restore();
+}
+
+// ── tag geometry ──────────────────────────────────────────────────────────────
+const HALF=0.1651/2;
+function tagCorners(tag){
+  // right = perpendicular to normal in XY: (-ny, nx, 0)
+  const rx=-tag.ny, ry=tag.nx;
+  const cx=tag.x, cy=tag.y, cz=tag.z;
+  return [
+    [cx+rx*HALF, cy+ry*HALF, cz+HALF],  // top-right (from front)
+    [cx+rx*HALF, cy+ry*HALF, cz-HALF],  // bot-right
+    [cx-rx*HALF, cy-ry*HALF, cz-HALF],  // bot-left
+    [cx-rx*HALF, cy-ry*HALF, cz+HALF],  // top-left
+  ];
+}
+
+// ── render ────────────────────────────────────────────────────────────────────
+function render(){
+  const v=getView();
+  ctx.fillStyle='#0d1117'; ctx.fillRect(0,0,canvas.width,canvas.height);
+
+  const fl=DATA.field.length, fw=DATA.field.width;
+
+  // field grid
+  for(let x=0;x<=fl;x+=2) line3([x,0,0],[x,fw,0],'#121c15',0.5,v);
+  for(let y=0;y<=fw;y+=2) line3([0,y,0],[fl,y,0],'#121c15',0.5,v);
+  // field border
+  const fc=[[0,0,0],[fl,0,0],[fl,fw,0],[0,fw,0]];
+  for(let i=0;i<4;i++) line3(fc[i],fc[(i+1)%4],'#1e4a2a',1.5,v);
+  line3([fl/2,0,0],[fl/2,fw,0],'#193c21',1,v);
+  // axis ticks
+  for(let x=0;x<=fl;x+=4){
+    label3([x,-0.5,0],x+'','#253d2c',false,v);
+  }
+  for(let y=0;y<=fw;y+=2){
+    label3([-0.6,y,0],y+'','#253d2c',false,v);
+  }
+
+  // tag->camera lookup
+  const tagCams={};
+  DATA.cameras.forEach(c=>c.detected.forEach(tid=>{
+    if(!tagCams[tid]) tagCams[tid]=[];
+    tagCams[tid].push(c);
+  }));
+
+  // lines of sight (before tags)
+  DATA.cameras.forEach(c=>{
+    if(c.x===null) return;
+    const cpos=[c.x,c.y,c.z];
+    c.detected.forEach(tid=>{
+      const tag=DATA.tags.find(t=>t.id===tid); if(!tag) return;
+      line3(cpos,[tag.x,tag.y,tag.z],c.color+'55',1,v,[5,4]);
+    });
+  });
+
+  // tags sorted back-to-front
+  const sorted=DATA.tags.map(tag=>{
+    const p=proj([tag.x,tag.y,tag.z],v);
+    return {tag, depth:p?p[2]:9999};
+  }).sort((a,b)=>b.depth-a.depth);
+
+  sorted.forEach(({tag})=>{
+    const cams=tagCams[tag.id]||[];
+    const det=cams.length>0;
+    const col=det?cams[0].color:'#1e3528';
+
+    // tag rectangle
+    const corners=tagCorners(tag);
+    poly3(corners, det?col+'25':'#111a14', det?col+'bb':'#1e3528', det?1.5:0.7, v);
+
+    // facing arrow — spike extending from face center
+    const ARRLEN=0.45;
+    const tip=[tag.x+tag.nx*ARRLEN, tag.y+tag.ny*ARRLEN, tag.z];
+    line3([tag.x,tag.y,tag.z], tip, det?col+'cc':'#1e3528', det?1.5:0.7, v);
+    // crossbar at tip
+    const rx=-tag.ny*0.08, ry=tag.nx*0.08;
+    line3([tip[0]+rx,tip[1]+ry,tip[2]], [tip[0]-rx,tip[1]-ry,tip[2]], det?col+'cc':'#1e3528', det?1.5:0.7, v);
+
+    // id
+    label3([tag.x,tag.y,tag.z+HALF+0.12], ''+tag.id, det?col:'#253d2c', det, v);
+  });
+
+  // cameras
+  DATA.cameras.forEach(c=>{
+    if(c.x===null) return;
+    const cpos=[c.x,c.y,c.z];
+    const p=proj(cpos,v); if(!p) return;
+    const R=7;
+    ctx.save();
+    ctx.strokeStyle=c.color; ctx.lineWidth=1.5;
+    ctx.beginPath(); ctx.arc(p[0],p[1],R,0,Math.PI*2); ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(p[0]-R*1.8,p[1]); ctx.lineTo(p[0]-R,p[1]);
+    ctx.moveTo(p[0]+R,p[1]);     ctx.lineTo(p[0]+R*1.8,p[1]);
+    ctx.moveTo(p[0],p[1]-R*1.8); ctx.lineTo(p[0],p[1]-R);
+    ctx.moveTo(p[0],p[1]+R);     ctx.lineTo(p[0],p[1]+R*1.8);
+    ctx.stroke();
+    ctx.fillStyle=c.color; ctx.beginPath(); ctx.arc(p[0],p[1],2,0,Math.PI*2); ctx.fill();
+    ctx.textAlign='left';
+    ctx.font='bold 10px monospace'; ctx.fillText(c.name,p[0]+R+4,p[1]+4);
+    ctx.fillStyle=c.color+'99'; ctx.font='9px monospace';
+    ctx.fillText(`[${c.x.toFixed(2)}, ${c.y.toFixed(2)}, ${c.z.toFixed(2)}]`,p[0]+R+4,p[1]+14);
+    ctx.restore();
+
+    // yaw direction line
+    if(c.yaw!==null){
+      const yR=c.yaw*Math.PI/180;
+      const end=[c.x+Math.cos(yR)*2, c.y+Math.sin(yR)*2, c.z];
+      line3(cpos,end,c.color+'88',1.5,v);
+    }
+
+    // vertical drop to floor
+    line3(cpos,[c.x,c.y,0],c.color+'22',0.8,v,[2,4]);
+  });
+}
+
+// ── hover tooltip ─────────────────────────────────────────────────────────────
+let hoverObj=null;
+
+function findHover(mx,my){
+  const v=getView();
+  let best=null, bestD=16;
+  DATA.tags.forEach(tag=>{
+    const p=proj([tag.x,tag.y,tag.z],v); if(!p) return;
+    const d=Math.hypot(p[0]-mx,p[1]-my);
+    if(d<bestD){bestD=d;best={type:'tag',tag};}
+  });
+  DATA.cameras.forEach(c=>{
+    if(c.x===null) return;
+    const p=proj([c.x,c.y,c.z],v); if(!p) return;
+    const d=Math.hypot(p[0]-mx,p[1]-my);
+    if(d<bestD){bestD=d;best={type:'cam',cam:c};}
+  });
+  return best;
+}
+
+canvas.addEventListener('mousemove',e=>{
+  if(drag) return;
+  const obj=findHover(e.clientX,e.clientY);
+  if(obj!==hoverObj){ hoverObj=obj; }
+  if(!obj){ tt.style.display='none'; return; }
+  let html='';
+  const tagCams={};
+  DATA.cameras.forEach(c=>c.detected.forEach(tid=>{
+    if(!tagCams[tid]) tagCams[tid]=[];
+    tagCams[tid].push(c);
+  }));
+  if(obj.type==='tag'){
+    const t=obj.tag;
+    const cams=tagCams[t.id]||[];
+    const camStr=cams.length
+      ? cams.map(c=>`<span style="color:${c.color}">${c.name}</span>`).join(' ')
+      : '<span style="color:#253d2c">undetected</span>';
+    html=`<b>Tag ${t.id}</b> — ${camStr}<br>`
+       + `pos [${t.x.toFixed(3)}, ${t.y.toFixed(3)}, ${t.z.toFixed(3)}]<br>`
+       + `facing (${t.nx>0?'+':''}${t.nx}, ${t.ny>0?'+':''}${t.ny}, 0)`;
+    cams.forEach(c=>{
+      const r=c.residuals[t.id];
+      if(r) html+=`<br><span style="color:${c.color}">${c.name}</span> reproj=${r.reproj_px}px  dist=${r.dist_m}m`;
+    });
+  } else {
+    const c=obj.cam;
+    html=`<b style="color:${c.color}">${c.name}</b><br>`
+       + `pos [${c.x.toFixed(3)}, ${c.y.toFixed(3)}, ${c.z.toFixed(3)}]<br>`
+       + `yaw=${c.yaw}°  pitch=${c.pitch}°<br>`
+       + `rms=${c.rms}px  ${c.detected.length} tags detected`;
+  }
+  tt.innerHTML=html;
+  tt.style.display='block';
+  tt.style.left=(e.clientX+14)+'px';
+  tt.style.top=(e.clientY-8)+'px';
+});
+canvas.addEventListener('mouseleave',()=>{ tt.style.display='none'; hoverObj=null; });
+
+// ── orbit / pan controls ──────────────────────────────────────────────────────
+let drag=null;
+const snap={az:cam.az,el:cam.el,tx:cam.tx,ty:cam.ty,tz:cam.tz};
+
+canvas.addEventListener('mousedown',e=>{
+  drag={x:e.clientX,y:e.clientY,btn:e.button,...snap};
+  canvas.style.cursor='grabbing';
+  e.preventDefault();
+});
+window.addEventListener('mouseup',()=>{
+  if(drag){
+    snap.az=cam.az; snap.el=cam.el;
+    snap.tx=cam.tx; snap.ty=cam.ty; snap.tz=cam.tz;
+    drag=null;
+  }
+  canvas.style.cursor='grab';
+});
+window.addEventListener('mousemove',e=>{
+  if(!drag) return;
+  const dx=e.clientX-drag.x, dy=e.clientY-drag.y;
+  if(drag.btn===0 && !e.shiftKey){
+    cam.az=drag.az-dx*0.4;
+    cam.el=Math.max(-85,Math.min(85,drag.el+dy*0.3));
+  } else {
+    const v=getView();
+    const s=cam.dist/canvas.height*1.6;
+    cam.tx=drag.tx - v.right[0]*dx*s + v.up[0]*dy*s;
+    cam.ty=drag.ty - v.right[1]*dx*s + v.up[1]*dy*s;
+    cam.tz=drag.tz - v.right[2]*dx*s + v.up[2]*dy*s;
+  }
+  render();
+});
+canvas.addEventListener('wheel',e=>{
+  cam.dist=Math.max(1,cam.dist*(1+e.deltaY*0.001));
+  render(); e.preventDefault();
+},{passive:false});
+canvas.addEventListener('contextmenu',e=>e.preventDefault());
+window.addEventListener('resize',resize);
+resize();
+</script>

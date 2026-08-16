@@ -1,0 +1,34 @@
+# ============================================================
+# YOLO Robot Detection — central config
+# ============================================================
+
+label_studio:
+  base_url: "https://app.humansignal.com"
+  project_id: 279385
+  label_blue: "Blue robot center"
+  label_red:  "Red robot center"
+  from_name: "kp"
+  to_name: "image"
+
+r2:
+  bucket: "assets"
+  prefix: "sprocketstats/training_round_2/"
+  local_image_root: "data/images_raw"   # flat mirror; train/val symlinks built by pull
+
+classes:
+  - blue   # class 0
+  - red    # class 1
+
+train:
+  model: "yolo26n.pt"          # pretrained checkpoint (downloaded automatically)
+  epochs: 100
+  imgsz: 1280
+  batch: 8
+  val_frac: 0.15               # match-level holdout
+  seed: 42
+  device: 0                    # GPU index; "cpu" to force CPU
+
+paths:
+  export_dir: "data/exports"
+  dataset_yaml: "data/dataset.yaml"
+  runs_dir: "data/runs"

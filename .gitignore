@@ -1,1 +1,33 @@
-d/sampled_frames/
+/sampled_frames/
+
+# secrets
+.env
+.env*
+*cookies.txt
+
+# python
+__pycache__/
+*.pyc
+.venv/
+
+# local tooling
+.claude/
+
+# media + model weights
+*.mp4
+*.pt
+
+# generated training output
+runs/
+YOLO/data/
+YOLO/runs/
+
+# large / derived data
+HRNet-W32/data/frc/images/
+HRNet-W32/data/frc/youtube_cache/
+HRNet-W32/data/test_ocr/
+HRNet-W32/data/frc/exports/snapshot_*.json
+homography/data/calibration/
+homography/data/detections/
+homography/data/topdown/
+scratch/*.zip

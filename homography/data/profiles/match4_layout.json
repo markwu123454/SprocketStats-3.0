@@ -1,0 +1,40 @@
+{
+  "layout": "stacked",
+  "views": [
+    {
+      "name": "main",
+      "box": [
+        0,
+        0,
+        1920,
+        710
+      ],
+      "area": 1363200,
+      "fraction": 0.657
+    },
+    {
+      "name": "bot_left",
+      "box": [
+        0,
+        744,
+        940,
+        1080
+      ],
+      "area": 315840,
+      "fraction": 0.152
+    },
+    {
+      "name": "bot_right",
+      "box": [
+        977,
+        744,
+        1920,
+        1080
+      ],
+      "area": 316848,
+      "fraction": 0.153
+    }
+  ],
+  "img_w": 1920,
+  "img_h": 1080
+}
