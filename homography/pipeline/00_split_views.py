@@ -21,16 +21,25 @@ Algorithm
    correctly.
 4. Districts that composite feeds edge-to-edge with no static graphic
    between them have no such trough. When none is found, fall back to a
-   persistent-edge search (_gradient_ridge_seam): a compositing seam sits
+   persistent-edge search (_gradient_ridge_seams): a compositing seam sits
    at the same pixel column/row in every frame, unlike real scene content
-   which drifts frame to frame and smears out under averaging. A candidate
-   found this way is confirmed via temporal decorrelation
-   (_seam_is_independent) so a strong static edge inside one real camera
-   view -- a yard line, a scoring-table divider -- isn't mistaken for a
-   seam between two different ones.
+   which drifts frame to frame and smears out under averaging. More than
+   one such seam can exist per axis (e.g. view | rotating cg | view, where
+   neither boundary has a static graphic). A candidate must also be razor
+   thin and present in nearly every sampled frame -- a real compositing cut
+   is ~1-4px wide, unlike a soft/wide feature rendered as part of a
+   graphic -- and pass temporal decorrelation (_seam_is_independent) so a
+   strong static edge inside one real camera view isn't mistaken for a seam
+   between two different ones.
 5. Keep only resulting rectangles larger than MIN_VIEW_FRACTION of the
-   full frame. These are the camera views.
-6. Sort into a stable reading order (top-to-bottom, left-to-right) and
+   full frame.
+6. Drop any surviving rectangle whose content looks like a CG graphic
+   rather than live camera footage (exclude_cg_regions): a rotating
+   sponsor panel or scorebug has a background plus a handful of
+   flat-colored logos/text, so its color-histogram entropy stays low in
+   every sampled frame regardless of which specific graphic is showing;
+   real video doesn't. What's left are the camera views.
+7. Sort into a stable reading order (top-to-bottom, left-to-right) and
    assign each an opaque index name (view0, view1, ...) purely so output
    is deterministic across runs -- this is not a claim about which
    physical camera feed a view is; downstream code never inspects the name.
@@ -76,11 +85,62 @@ MIN_VIEW_FRACTION = 0.08
 # still starting points, not independently validated.
 RIDGE_MIN_PEAK_RATIO      = 4.0   # candidate seam's gradient peak vs. neighborhood median
 RIDGE_EDGE_FRAC           = 0.05  # ignore this fraction of the strip at each edge
-RIDGE_MAX_FWHM_PX         = 4     # max width (px) of the averaged gradient peak
+RIDGE_MAX_FWHM_PX         = 5     # max width (px) of the averaged gradient peak
 RIDGE_MIN_FRAME_CONSISTENCY = 0.9 # fraction of sampled frames the edge must appear in
 SEAM_CORR_MAX             = 0.6   # frame-to-frame delta correlation across the seam must be below this
 SEAM_MARGIN_PX            = 4     # strip width sampled on each side of a candidate seam
 SEAM_MIN_FRAMES           = 8     # too few frames makes the correlation meaningless
+RIDGE_MIN_SEAM_SEPARATION_PX = 30 # candidates closer than this can't both be real (see _gradient_ridge_seams)
+RIDGE_SEAM_MERGE_PX          = 3  # candidates closer than this are one edge detected twice, not two edges
+
+# Hough/Radon-style full-span coverage gate: a real compositing seam is a
+# strong edge across essentially its ENTIRE length (the whole frame width/
+# height switches source at that line), unlike a localized scene feature
+# that only produces a strong gradient over part of its length. Measured
+# on real footage: two confirmed-false candidates (structural edges inside
+# a genuinely single continuous view) covered only 8-19% of their length
+# at >=50% of their own peak value; two confirmed/likely-real seams covered
+# 37-53%. Clean separation, no overlap in this sample.
+SPATIAL_COVERAGE_HALF_FRAC = 0.5   # a point "counts" if it's above this fraction of the line's own peak
+SPATIAL_COVERAGE_MIN_FRAC  = 0.25  # the line must have at least this fraction of its length counted
+
+# --- Borderless-seam content check ---
+# A gradient ridge is only a compositing cut if the two sides are genuinely
+# different footage. A strong line INSIDE one continuous camera view -- a field
+# center line, a guardrail -- produces an identical ridge, and on a locked wide
+# shot temporal independence can't reject it either (the two halves of one field
+# have independent local motion). The static scene is what tells them apart:
+# across a real cut the two sides are unrelated, across a field line the SAME
+# scene continues (carpet/brightness match). Measured on real footage a field
+# center line scored ~0.03-0.09; genuine borderless seams scored ~0.39-0.68.
+# Known limit: two adjacent feeds of near-identical content (e.g. two field
+# cams) would also score low -- not seen in practice, and inherently ambiguous.
+CONTENT_DISSIM_MIN  = 0.25   # 1 - corr(mean-image strips across the seam)
+CONTENT_DISSIM_HALF = 20     # px of static content sampled each side
+CONTENT_DISSIM_GAP  = 4      # px skipped at the seam so a painted line can't inflate it
+
+# --- Horizontal borderless-cut refinement ---
+# A row-axis ridge snaps to the strongest horizontal edge, which on a main field
+# view is the guardrail/field border -- not the compositing cut, which sits lower
+# where the bottom strip of feeds begins. The bottom strip carries vertical
+# compositing seams; the field above does not. So the true cut is the row where
+# per-row vertical-edge structure turns on. Measured: 619 (true cut) vs 596
+# (border edge the ridge latched onto) -- a ~23px correction.
+HCUT_REFINE_SEARCH   = 32    # px window around the ridge candidate to search
+HCUT_REFINE_MIN_STEP = 1.25  # vertical structure below the cut must exceed above by this
+
+# --- CG-region classification (color concentration) ---
+# Below this per-frame color-histogram entropy (bits), a region is treated
+# as a CG graphic rather than live camera content. Validated against one
+# real match: a confirmed CG panel measured ~3.6 bits, confirmed camera
+# views measured ~9.5-9.8 bits, and a real camera view carrying a partial
+# CG overlay (correctly NOT excluded) measured ~7.9-8.0 bits. This
+# threshold sits comfortably below all three seen so far; it hasn't been
+# validated against a genuinely rotating CG panel, where averaging color
+# across several different graphic states per sampled frame could
+# plausibly land higher than a single static graphic would.
+CG_ENTROPY_THRESHOLD = 6.0
+CG_HIST_BINS         = 24
 
 
 # ---------------------------------------------------------------------------
@@ -167,11 +227,13 @@ def middle_frames(event_match: str, n: int = 30,
 
 def sample_video_frames(video_path: str, n: int = 200,
                         start_frac: float = 0.25,
-                        end_frac: float = 0.75) -> tuple[list[np.ndarray], np.ndarray]:
+                        end_frac: float = 0.75
+                        ) -> tuple[list[np.ndarray], list[np.ndarray], np.ndarray]:
     """
     Sample n evenly-spaced frames from the middle portion of a local video.
-    Returns (grays, ref_bgr) where grays are grayscale frames and ref_bgr is
-    the middle sampled frame in color (used as the reference image for viz).
+    Returns (grays, bgrs, ref_bgr): grayscale frames for the temporal/edge
+    detection, the same frames in color for CG-region classification, and
+    the middle sampled frame (again in color) for crops/visualization.
     """
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -184,7 +246,7 @@ def sample_video_frames(video_path: str, n: int = 200,
     indices = list(range(lo, hi + 1, step))[:n]
     print(f"[video] sampling {len(indices)} frames "
           f"[{indices[0]}..{indices[-1]}]", file=sys.stderr)
-    grays = []
+    grays, bgrs = [], []
     ref_bgr = None
     mid_idx = indices[len(indices) // 2]
     for idx in indices:
@@ -195,6 +257,7 @@ def sample_video_frames(video_path: str, n: int = 200,
             continue
         if idx == mid_idx:
             ref_bgr = frame
+        bgrs.append(frame)
         grays.append(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
     cap.release()
     if ref_bgr is None and grays:
@@ -203,14 +266,14 @@ def sample_video_frames(video_path: str, n: int = 200,
         cap2.set(cv2.CAP_PROP_POS_FRAMES, mid_idx)
         _, ref_bgr = cap2.read()
         cap2.release()
-    return grays, ref_bgr
+    return grays, bgrs, ref_bgr
 
 
-def load_gray(path: pathlib.Path) -> np.ndarray:
+def load_gray_and_bgr(path: pathlib.Path) -> tuple[np.ndarray, np.ndarray]:
     img = cv2.imread(str(path))
     if img is None:
         sys.exit(f"[error] cannot read {path}")
-    return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), img
 
 
 # ---------------------------------------------------------------------------
@@ -324,25 +387,49 @@ def _segments_from_bands(bands: list[tuple[int, int]], length: int) -> list[tupl
     return segs
 
 
-def _gradient_ridge_seam(frames_gray: list[np.ndarray], axis: int) -> int | None:
+def _gradient_ridge_seams(frames_gray: list[np.ndarray], axis: int) -> list[int]:
     """
-    Find a candidate compositing-seam location for a view split that has no
-    static CG graphic drawn at the boundary.
+    Find every candidate compositing-seam location for a view split that
+    has no static CG graphic drawn at the boundary -- not just the single
+    strongest one, since a layout can have more than one borderless seam
+    per axis (e.g. view | rotating cg | view, where neither boundary has a
+    static graphic to anchor a temporal-range trough).
 
-    _local_minima_bands finds STATIC pixels; this finds a PERSISTENT EDGE
+    _local_minima_bands finds STATIC pixels; this finds PERSISTENT EDGES
     instead. A broadcast mixer seam sits at the exact same pixel column/row
     in every frame, so the mean gradient magnitude there, averaged over many
     frames, stays high. A real scene edge doesn't: it drifts by a pixel or
     more frame to frame from compression and stabilization jitter, so
     averaging smears it out. That gap is what separates a seam from ordinary
-    in-view content.
+    in-view content -- but it's not sufficient on its own (see below).
 
     `axis=0` looks for a horizontal separator (top/bottom split, scans rows
     via the vertical gradient); `axis=1` looks for a vertical separator
     (left/right split, scans columns via the horizontal gradient).
 
-    Returns the candidate index, or None if nothing stands out enough to be
-    worth testing further with `_seam_is_independent`.
+    Each candidate local maximum must also be:
+      - razor thin (RIDGE_MAX_FWHM_PX): a real compositing cut is a mixer
+        switching source at an exact pixel column. A strong edge that's
+        several pixels wide -- a divider bar rendered as part of a graphic,
+        a blurred/antialiased scene edge -- is not that, even with a high
+        average gradient. Measured on real footage: a confirmed genuine
+        seam came out ~2-4 columns wide (full-width-half-max); a false
+        candidate inside a CG graphic's internal divider came out ~6
+        columns wide with a second nearby bump.
+      - present in nearly every sampled frame (RIDGE_MIN_FRAME_CONSISTENCY):
+        not just strong on average -- a few outlier frames dragging the
+        mean up (a robot passing near the boundary, a one-off compression
+        artifact) shouldn't count as "the seam is always there".
+      - strong across most of its own length (SPATIAL_COVERAGE_MIN_FRAC):
+        a Hough/Radon-style full-span check -- a real seam is a strong edge
+        essentially everywhere along the row/column, since the whole frame
+        width/height switches source there, unlike a localized scene
+        feature that only produces a strong gradient over part of its
+        length while still averaging to a high peak.
+
+    Returns candidate indices, still needing `_seam_is_independent`
+    confirmation -- these gates alone don't distinguish two different
+    camera sources from one continuous feed with a genuinely sharp edge.
     """
     per_frame_profiles = []
     acc = None
@@ -360,38 +447,85 @@ def _gradient_ridge_seam(frames_gray: list[np.ndarray], axis: int) -> int | None
     n = len(profile)
     lo, hi = int(n * RIDGE_EDGE_FRAC), int(n * (1 - RIDGE_EDGE_FRAC))
     if hi <= lo:
-        return None
-    idx  = int(profile[lo:hi].argmax()) + lo
-    peak = profile[idx]
+        return []
 
-    mask = np.ones(n, dtype=bool)
-    mask[max(0, idx - 3):idx + 4] = False
-    neighborhood = profile[mask]
-    baseline = float(np.median(neighborhood)) if neighborhood.size else 0.0
-    if baseline <= 0 or peak / baseline < RIDGE_MIN_PEAK_RATIO:
-        return None
+    candidates = []
+    for idx in range(lo, hi):
+        left  = profile[idx - 1] if idx > 0 else profile[idx]
+        right = profile[idx + 1] if idx < n - 1 else profile[idx]
+        if profile[idx] < left or profile[idx] < right:
+            continue  # not a local maximum
+        peak = profile[idx]
 
-    # A real compositing cut is razor-thin -- a mixer switches source at an
-    # exact pixel column. A strong edge that's several pixels wide (a
-    # divider bar rendered as part of a graphic, a blurred/antialiased
-    # scene edge) is not that, even if its average gradient is high.
-    # Measured on real footage: a confirmed genuine seam came out ~2 columns
-    # wide (full-width-half-max); a false candidate inside a CG graphic's
-    # internal divider came out ~6 columns wide with a second nearby bump.
-    half = peak / 2.0
-    width = int(np.sum(profile > half))
-    if width > RIDGE_MAX_FWHM_PX:
-        return None
+        mask = np.ones(n, dtype=bool)
+        mask[max(0, idx - 3):idx + 4] = False
+        neighborhood = profile[mask]
+        baseline = float(np.median(neighborhood)) if neighborhood.size else 0.0
+        if baseline <= 0 or peak / baseline < RIDGE_MIN_PEAK_RATIO:
+            continue
 
-    # A real seam is there in essentially every sampled frame, not just
-    # strong on average -- a few outlier frames dragging the mean up (a
-    # robot passing near the boundary, a one-off compression artifact)
-    # shouldn't count as "the seam is always there".
-    frac_present = float(np.mean([p[idx] > half for p in per_frame_profiles]))
-    if frac_present < RIDGE_MIN_FRAME_CONSISTENCY:
-        return None
+        # Width of THIS peak specifically -- grow outward from idx, not a
+        # global count, so a second unrelated peak elsewhere in the profile
+        # can't inflate this candidate's measured width.
+        half = peak / 2.0
+        l = idx
+        while l > 0 and profile[l - 1] > half:
+            l -= 1
+        r = idx
+        while r < n - 1 and profile[r + 1] > half:
+            r += 1
+        if r - l + 1 > RIDGE_MAX_FWHM_PX:
+            continue
 
-    return idx
+        frac_present = float(np.mean([p[idx] > half for p in per_frame_profiles]))
+        if frac_present < RIDGE_MIN_FRAME_CONSISTENCY:
+            continue
+
+        # Hough/Radon-style full-span coverage: a real seam is a strong
+        # edge across essentially its whole length, not just a localized
+        # feature that happens to average to a high peak. `line` is the raw
+        # per-pixel gradient ALONG the candidate row/column itself (not
+        # reduced across frames-only like `profile` is).
+        line = mean_grad[idx, :] if axis == 0 else mean_grad[:, idx]
+        line_peak = float(line.max())
+        coverage = float(np.mean(line > line_peak * SPATIAL_COVERAGE_HALF_FRAC)) if line_peak > 0 else 0.0
+        if coverage < SPATIAL_COVERAGE_MIN_FRAC:
+            continue
+
+        candidates.append(idx)
+
+    if not candidates:
+        return []
+
+    # Collapse near-duplicate detections of the SAME physical edge first --
+    # a real sharp edge with a little internal texture can register as two
+    # local maxima a few pixels apart rather than one clean peak (confirmed
+    # on real footage: a genuine seam showed up as two maxima 3px apart, at
+    # the FWHM boundary). Only after deduplicating do we check for
+    # genuinely distinct nearby candidates -- a different situation (two
+    # edges of one small graphic feature, confirmed on real footage 8px
+    # apart) that gets rejected as an ambiguous cluster rather than one
+    # picked from arbitrarily.
+    dedup_bands = _merge_bands([(c - RIDGE_SEAM_MERGE_PX, c + RIDGE_SEAM_MERGE_PX)
+                                for c in candidates])
+    dedup = [(s + e) // 2 for s, e in dedup_bands]
+
+    # Two candidates within RIDGE_MIN_SEAM_SEPARATION_PX of each other can't
+    # both be real view-splitting seams -- the content segment between them
+    # wouldn't come anywhere close to passing MIN_VIEW_FRACTION, so this is
+    # almost certainly two edges of one small graphic feature (an icon, a
+    # divider box) rather than two independent seams with a legitimate
+    # sliver of a view squeezed between them. Drop the whole cluster rather
+    # than guess which one, if either, is real.
+    isolated = []
+    for i, c in enumerate(dedup):
+        too_close_left  = i > 0 and c - dedup[i - 1] < RIDGE_MIN_SEAM_SEPARATION_PX
+        too_close_right = (i < len(dedup) - 1
+                           and dedup[i + 1] - c < RIDGE_MIN_SEAM_SEPARATION_PX)
+        if not too_close_left and not too_close_right:
+            isolated.append(c)
+
+    return isolated
 
 
 def _seam_is_independent(frames_gray: list[np.ndarray], axis: int, idx: int) -> bool:
@@ -429,28 +563,108 @@ def _seam_is_independent(frames_gray: list[np.ndarray], axis: int, idx: int) -> 
     return corr < SEAM_CORR_MAX
 
 
+def _mean_image(frames_gray: list[np.ndarray]) -> np.ndarray:
+    """Per-pixel temporal mean -- the static scene with moving content (balls,
+    robots, the switcher's live feed) averaged away. Accumulated incrementally
+    to avoid stacking every frame in memory at once."""
+    acc = frames_gray[0].astype(np.float32).copy()
+    for f in frames_gray[1:]:
+        acc += f
+    return acc / len(frames_gray)
+
+
+def _seam_content_dissimilarity(mean_gray: np.ndarray, axis: int, idx: int,
+                                half: int = CONTENT_DISSIM_HALF,
+                                gap: int = CONTENT_DISSIM_GAP) -> float:
+    """
+    1 - correlation between the static content just past each side of a
+    candidate seam. High -> the two sides are unrelated footage (a real cut).
+    Low -> the same continuous scene spans the seam, i.e. the "seam" is a field
+    line/guardrail painted on one camera's view (see CONTENT_DISSIM_MIN).
+
+    The +-gap skip excludes the edge pixels themselves, so a bright painted line
+    can't inflate the score; the sides are compared as 1-D profiles along the
+    seam, which stays discriminative even when both sides are similarly lit.
+    """
+    h, w = mean_gray.shape
+    a0, a1, b0, b1 = idx - gap - half, idx - gap, idx + gap, idx + gap + half
+    if axis == 0:
+        if a0 < 0 or b1 > h:
+            return 0.0
+        A = mean_gray[a0:a1, :].mean(axis=0)
+        B = mean_gray[b0:b1, :].mean(axis=0)
+    else:
+        if a0 < 0 or b1 > w:
+            return 0.0
+        A = mean_gray[:, a0:a1].mean(axis=1)
+        B = mean_gray[:, b0:b1].mean(axis=1)
+    if A.std() < 1e-6 or B.std() < 1e-6:
+        return 0.0
+    return 1.0 - float(np.corrcoef(A, B)[0, 1])
+
+
+def _refine_hcut_to_vertical_extent(mean_gray: np.ndarray, idx: int,
+                                    search: int = HCUT_REFINE_SEARCH) -> int:
+    """
+    Move a horizontal borderless cut from the field-border edge a row-axis ridge
+    latches onto, down to where the bottom strip's vertical seams actually begin.
+
+    A composited bottom row makes each of its rows carry several strong vertical
+    edges (the seams between its feeds); the single continuous view above carries
+    far fewer. So the cut is the row where that per-row vertical-edge structure
+    turns on. Returns idx unchanged when there's no such structure nearby (the
+    region below is a single continuous view, not a composited row).
+    """
+    h, w = mean_gray.shape
+    sx = np.abs(cv2.Sobel(cv2.GaussianBlur(mean_gray, (3, 3), 0),
+                          cv2.CV_32F, 1, 0, ksize=3))
+    k = min(6, w)
+    topk = np.partition(sx, w - k, axis=1)[:, w - k:].mean(axis=1)
+    topk = cv2.GaussianBlur(topk.reshape(-1, 1), (1, 5), 0).ravel()
+    lo = max(1, idx - search)
+    hi = min(h - 1, idx + search + 8)          # slight downward bias: the cut is below the border
+    if hi - lo < 3:
+        return idx
+    y = lo + int(np.argmax(np.gradient(topk)[lo:hi]))   # strongest onset of vertical structure
+    above = topk[max(0, y - 20):y].mean()
+    below = topk[y:y + 20].mean()
+    return y if below > above * HCUT_REFINE_MIN_STEP else idx
+
+
 def _find_separators(profile: np.ndarray, frames_gray: list[np.ndarray] | None,
                      axis: int) -> list[tuple[int, int]]:
     """
     Find separator bands along one axis of one content strip.
 
-    Tries the static-CG-border signal first (possibly more than one band --
-    see _local_minima_bands). If none qualifies and frame data is available,
-    falls back to the borderless-seam search: a persistent-edge candidate,
-    confirmed via temporal decorrelation so a strong static edge inside one
-    real camera view doesn't get mistaken for a seam between two different
-    ones. A given broadcast is consistently one style or the other, so this
-    cascade -- run independently per strip -- ends up behaving consistently
-    across the whole frame without needing an explicit global decision.
+    Static-CG borders show up as troughs (_local_minima_bands) and are found
+    first. Borderless cuts (feeds composited edge-to-edge, no graphic between)
+    are found as persistent gradient ridges, then put through two filters so
+    field geometry can't masquerade as a seam -- both are needed because a ridge
+    alone cannot tell a compositing cut from a strong line inside one view:
+      - _seam_is_independent: the two sides change independently frame to frame.
+      - _seam_content_dissimilarity: the two sides are unrelated static footage.
+        This is the one that rejects the false midline split on a single wide
+        field shot -- edge strength and temporal independence both pass there
+        (two halves of one field move independently), the shared static
+        background is the only tell.
+    A confirmed horizontal cut is then snapped off the field-border edge it
+    latched onto, down to where the bottom strip's feeds begin
+    (_refine_hcut_to_vertical_extent). Both signals run on every axis regardless
+    of what the trough pass found, so a hard cut still gets detected on an axis
+    that also carries a static CG band elsewhere.
     """
-    bands = _local_minima_bands(profile)
-    if bands:
-        return bands
+    bands = list(_local_minima_bands(profile))
     if frames_gray:
-        idx = _gradient_ridge_seam(frames_gray, axis)
-        if idx is not None and _seam_is_independent(frames_gray, axis, idx):
-            return [(idx, idx)]
-    return []
+        mean_gray = _mean_image(frames_gray)
+        for idx in _gradient_ridge_seams(frames_gray, axis):
+            if not _seam_is_independent(frames_gray, axis, idx):
+                continue
+            if _seam_content_dissimilarity(mean_gray, axis, idx) < CONTENT_DISSIM_MIN:
+                continue
+            if axis == 0:
+                idx = _refine_hcut_to_vertical_extent(mean_gray, idx)
+            bands.append((idx, idx))
+    return _merge_bands(bands)
 
 
 def find_camera_rects(range_img: np.ndarray,
@@ -496,6 +710,64 @@ def find_camera_rects(range_img: np.ndarray,
 
     rects.sort(key=lambda r: -r["area"])
     return rects
+
+
+# ---------------------------------------------------------------------------
+# CG-region classification (color concentration)
+# ---------------------------------------------------------------------------
+
+def _color_entropy(frames_bgr: list[np.ndarray], box: list[int]) -> float:
+    """
+    Mean per-frame color-histogram entropy (bits) over a region.
+
+    Low entropy = a few dominant colors (CG-like -- a graphic's flat-color
+    background plus a handful of logo/text colors). High entropy = broadly
+    distributed colors (camera-like -- a real scene has no such small
+    palette). Computed per frame and averaged, not on an accumulated image,
+    so a ROTATING panel still reads as low-entropy: whichever specific
+    graphic is showing in a given frame is itself low-entropy, even though
+    the graphic differs frame to frame.
+    """
+    x0, y0, x1, y1 = box
+    entropies = []
+    for f in frames_bgr:
+        crop = f[y0:y1, x0:x1]
+        hist = cv2.calcHist([crop], [0, 1, 2], None,
+                            [CG_HIST_BINS] * 3, [0, 256] * 3).flatten()
+        total = hist.sum()
+        if total == 0:
+            continue
+        p = hist / total
+        p_nz = p[p > 0]
+        entropies.append(float(-np.sum(p_nz * np.log2(p_nz))))
+    return float(np.mean(entropies)) if entropies else 0.0
+
+
+def exclude_cg_regions(rects: list[dict],
+                       frames_bgr: list[np.ndarray] | None) -> tuple[list[dict], list[dict]]:
+    """
+    Split detected rectangles into (camera views, CG-like regions).
+
+    Runs after find_camera_rects -- a region reaching here already passed
+    the geometric/temporal detection, so this is purely about content: does
+    it look like a graphic (a rotating sponsor panel, a scorebug) rather
+    than live footage? See _color_entropy. This is the mechanism that
+    excludes a rotating CG panel the geometric detectors can't tell apart
+    from a real view any other way.
+
+    `frames_bgr` is required for this; without it (e.g. reusing a cached
+    profile with no frame data), nothing gets excluded here.
+    """
+    if not frames_bgr:
+        return rects, []
+    kept, excluded = [], []
+    for r in rects:
+        ent = _color_entropy(frames_bgr, r["box"])
+        if ent < CG_ENTROPY_THRESHOLD:
+            excluded.append({**r, "entropy": round(ent, 2)})
+        else:
+            kept.append(r)
+    return kept, excluded
 
 
 # ---------------------------------------------------------------------------
@@ -621,10 +893,11 @@ def main():
 
     # ---- resolve event_match and frame list ----
     video_grays = None   # set when --video is used
+    video_bgrs  = None
     if args.video:
         video_path  = args.video
         event_match = pathlib.Path(video_path).stem
-        video_grays, ref_img = sample_video_frames(video_path, args.n_frames)
+        video_grays, video_bgrs, ref_img = sample_video_frames(video_path, args.n_frames)
         if ref_img is None:
             sys.exit("[error] could not read any frames from video")
         img_h, img_w = ref_img.shape[:2]
@@ -651,6 +924,7 @@ def main():
     else:
         # Accumulate frames
         frames_for_split = None   # None unless we have per-frame pixel data
+        frames_bgr       = None   # None unless we have per-frame color data
         if args.range_image:
             ri = cv2.imread(args.range_image, cv2.IMREAD_GRAYSCALE)
             if ri is None:
@@ -663,21 +937,25 @@ def main():
                 sys.exit("[error] no frames loaded from video")
             range_img = accumulate_range(video_grays)
             frames_for_split = video_grays
+            frames_bgr       = video_bgrs
             print(f"[accum] range: min={range_img.min():.1f} "
                   f"max={range_img.max():.1f} "
                   f"mean={range_img.mean():.1f}", file=sys.stderr)
         else:
             print(f"[accum] loading {len(frame_indices)} frames ...", file=sys.stderr)
-            grays = []
+            grays, bgrs = [], []
             for fi in frame_indices:
                 try:
-                    grays.append(load_gray(fetch_frame(event_match, fi)))
+                    g, b = load_gray_and_bgr(fetch_frame(event_match, fi))
+                    grays.append(g)
+                    bgrs.append(b)
                 except Exception as e:
                     print(f"[warn] frame {fi} failed: {e}", file=sys.stderr)
             if not grays:
                 sys.exit("[error] no frames loaded")
             range_img = accumulate_range(grays)
             frames_for_split = grays
+            frames_bgr       = bgrs
             print(f"[accum] range: min={range_img.min():.1f} "
                   f"max={range_img.max():.1f} "
                   f"mean={range_img.mean():.1f}", file=sys.stderr)
@@ -688,6 +966,12 @@ def main():
             print(f"[range] saved -> {rp}", file=sys.stderr)
 
         rects = find_camera_rects(range_img, args.min_fraction, frames_for_split)
+        rects, excluded_cg = exclude_cg_regions(rects, frames_bgr)
+        if excluded_cg:
+            print(f"[cg] excluded {len(excluded_cg)} CG-like region(s): "
+                  + ", ".join(f"{r['box']} entropy={r['entropy']}" for r in excluded_cg),
+                  file=sys.stderr)
+
         views = label_views(rects, img_w, img_h)
         crops = named_crops(views)
 
