@@ -13,13 +13,24 @@ Algorithm
 2. Per pixel: compute the range (max - min) across all N frames.
    Static CG pixels -> range ~ 0.
    Live camera pixels -> range >> 0 (motion, noise, compression).
-3. Threshold the range image to get a binary "dynamic" mask.
-4. Morphological close to fill small static islands within camera views
-   (parked robot, still crowd member, etc.).
-5. Find bounding rectangles of connected dynamic regions.
-6. Keep only rectangles larger than MIN_AREA_FRACTION of the full frame.
-   These are the camera views.
-7. Sort into a stable reading order (top-to-bottom, left-to-right) and
+3. Row-wise, then column-wise (within each resulting strip), look for
+   separators along the temporal-range variance profile. Most districts
+   draw a static CG border/scoreboard strip between feeds, which shows up
+   as one or more troughs (see _local_minima_bands) -- not just the single
+   deepest one, so a row with three items (view | cg | view) still splits
+   correctly.
+4. Districts that composite feeds edge-to-edge with no static graphic
+   between them have no such trough. When none is found, fall back to a
+   persistent-edge search (_gradient_ridge_seam): a compositing seam sits
+   at the same pixel column/row in every frame, unlike real scene content
+   which drifts frame to frame and smears out under averaging. A candidate
+   found this way is confirmed via temporal decorrelation
+   (_seam_is_independent) so a strong static edge inside one real camera
+   view -- a yard line, a scoring-table divider -- isn't mistaken for a
+   seam between two different ones.
+5. Keep only resulting rectangles larger than MIN_VIEW_FRACTION of the
+   full frame. These are the camera views.
+6. Sort into a stable reading order (top-to-bottom, left-to-right) and
    assign each an opaque index name (view0, view1, ...) purely so output
    is deterministic across runs -- this is not a claim about which
    physical camera feed a view is; downstream code never inspects the name.
@@ -53,14 +64,23 @@ PROF_DIR  = DATA_DIR / "profiles"
 # Compressed H.264 CG elements: range ~2-5. Camera content: range ~30+.
 STATIC_THRESHOLD = 12
 
-# Morphological close kernel size (px). Fills static islands within a view
-# (parked robot, stopped game piece) without merging adjacent camera views.
-# Camera borders are typically 1-5 px wide, so keep this well below that.
-CLOSE_KERNEL_PX = 8
-
 # A bounding rectangle must cover at least this fraction of the frame to
 # count as a camera view (filters noise and tiny UI elements).
 MIN_VIEW_FRACTION = 0.08
+
+# --- Borderless-seam fallback (no static CG graphic between views) ---
+# Validated against real match footage (see homography/docs) -- a confirmed
+# genuine seam came out ~2px wide and present in ~100% of sampled frames; a
+# false candidate inside a CG graphic's internal divider came out ~6px wide
+# and merely "usually" present. Peak-ratio and correlation thresholds are
+# still starting points, not independently validated.
+RIDGE_MIN_PEAK_RATIO      = 4.0   # candidate seam's gradient peak vs. neighborhood median
+RIDGE_EDGE_FRAC           = 0.05  # ignore this fraction of the strip at each edge
+RIDGE_MAX_FWHM_PX         = 4     # max width (px) of the averaged gradient peak
+RIDGE_MIN_FRAME_CONSISTENCY = 0.9 # fraction of sampled frames the edge must appear in
+SEAM_CORR_MAX             = 0.6   # frame-to-frame delta correlation across the seam must be below this
+SEAM_MARGIN_PX            = 4     # strip width sampled on each side of a candidate seam
+SEAM_MIN_FRAMES           = 8     # too few frames makes the correlation meaningless
 
 
 # ---------------------------------------------------------------------------
@@ -228,86 +248,244 @@ def save_range_image(range_img: np.ndarray, path: pathlib.Path):
 # Dynamic mask -> camera rectangles
 # ---------------------------------------------------------------------------
 
-def _trough_band(profile: np.ndarray, grow_factor: float = 8.0,
-                 edge_frac: float = 0.05,
-                 max_trough_frac: float = 0.05) -> tuple[int, int] | None:
+def _local_minima_bands(profile: np.ndarray, grow_factor: float = 8.0,
+                        edge_frac: float = RIDGE_EDGE_FRAC,
+                        max_trough_frac: float = 0.05) -> list[tuple[int, int]]:
     """
-    Find the deepest trough in `profile` and grow outward until values exceed
-    grow_factor * trough_min.
+    Find every local minimum in `profile` that's a plausible static CG
+    separator, and grow each outward the same way a single deepest trough
+    would be.
 
-    Returns (start, end) pixel indices, or None if:
-      - the minimum is too close to an edge, or
-      - trough_min / profile.max() >= max_trough_frac  (not a real static separator,
-        just the quietest part of camera content)
+    A layout with more than one separator per axis (e.g. view | cg | view)
+    has more than one such minimum, so this returns however many qualify --
+    not just the single deepest one. A local minimum only qualifies if it's
+    meaningfully below the profile's peak (max_trough_frac gate); that
+    filters out the merely-quietest patch of real camera content, which is
+    never anywhere near as flat as an actual static CG region.
     """
     n = len(profile)
     lo, hi = int(n * edge_frac), int(n * (1 - edge_frac))
     if hi <= lo:
+        return []
+    pmax = float(profile.max())
+    if pmax <= 0:
+        return []
+
+    bands = []
+    for idx in range(lo, hi):
+        left  = profile[idx - 1] if idx > 0 else profile[idx]
+        right = profile[idx + 1] if idx < n - 1 else profile[idx]
+        if profile[idx] > left or profile[idx] > right:
+            continue  # not a local minimum
+        val = profile[idx]
+        if val / pmax >= max_trough_frac:
+            continue  # not meaningfully below peak content
+
+        threshold = val * grow_factor
+        l = idx
+        while l > 0 and profile[l - 1] <= threshold:
+            l -= 1
+        r = idx
+        while r < n - 1 and profile[r + 1] <= threshold:
+            r += 1
+        bands.append((l, r))
+
+    return _merge_bands(bands)
+
+
+def _merge_bands(bands: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Collapse overlapping/adjacent (start, end) bands -- e.g. two nearby
+    points on the same flat minimum plateau growing into each other."""
+    if not bands:
+        return []
+    bands = sorted(bands)
+    merged = [list(bands[0])]
+    for s, e in bands[1:]:
+        if s <= merged[-1][1] + 1:
+            merged[-1][1] = max(merged[-1][1], e)
+        else:
+            merged.append([s, e])
+    return [(s, e) for s, e in merged]
+
+
+def _segments_from_bands(bands: list[tuple[int, int]], length: int) -> list[tuple[int, int]]:
+    """Turn a sorted list of separator bands into the content segments
+    between/around them. No bands -> the whole span is one segment."""
+    if not bands:
+        return [(0, length)]
+    segs = []
+    prev_end = 0
+    for s, e in bands:
+        if s > prev_end:
+            segs.append((prev_end, s))
+        prev_end = e + 1
+    if prev_end < length:
+        segs.append((prev_end, length))
+    return segs
+
+
+def _gradient_ridge_seam(frames_gray: list[np.ndarray], axis: int) -> int | None:
+    """
+    Find a candidate compositing-seam location for a view split that has no
+    static CG graphic drawn at the boundary.
+
+    _local_minima_bands finds STATIC pixels; this finds a PERSISTENT EDGE
+    instead. A broadcast mixer seam sits at the exact same pixel column/row
+    in every frame, so the mean gradient magnitude there, averaged over many
+    frames, stays high. A real scene edge doesn't: it drifts by a pixel or
+    more frame to frame from compression and stabilization jitter, so
+    averaging smears it out. That gap is what separates a seam from ordinary
+    in-view content.
+
+    `axis=0` looks for a horizontal separator (top/bottom split, scans rows
+    via the vertical gradient); `axis=1` looks for a vertical separator
+    (left/right split, scans columns via the horizontal gradient).
+
+    Returns the candidate index, or None if nothing stands out enough to be
+    worth testing further with `_seam_is_independent`.
+    """
+    per_frame_profiles = []
+    acc = None
+    for g in frames_gray:
+        gray = g.astype(np.float32)
+        if axis == 1:
+            grad = np.abs(cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3))
+        else:
+            grad = np.abs(cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3))
+        acc = grad if acc is None else acc + grad
+        per_frame_profiles.append(grad.mean(axis=0) if axis == 1 else grad.mean(axis=1))
+    mean_grad = acc / len(frames_gray)
+    profile = mean_grad.mean(axis=0) if axis == 1 else mean_grad.mean(axis=1)
+
+    n = len(profile)
+    lo, hi = int(n * RIDGE_EDGE_FRAC), int(n * (1 - RIDGE_EDGE_FRAC))
+    if hi <= lo:
         return None
-    search = profile[lo:hi]
-    idx = int(search.argmin()) + lo
-    trough_min = profile[idx]
+    idx  = int(profile[lo:hi].argmax()) + lo
+    peak = profile[idx]
 
-    # Gate: if the trough is not significantly lower than peak content, skip it
-    if profile.max() > 0 and trough_min / profile.max() >= max_trough_frac:
+    mask = np.ones(n, dtype=bool)
+    mask[max(0, idx - 3):idx + 4] = False
+    neighborhood = profile[mask]
+    baseline = float(np.median(neighborhood)) if neighborhood.size else 0.0
+    if baseline <= 0 or peak / baseline < RIDGE_MIN_PEAK_RATIO:
         return None
 
-    threshold = trough_min * grow_factor
-    left = idx
-    while left > 0 and profile[left - 1] <= threshold:
-        left -= 1
-    right = idx
-    while right < n - 1 and profile[right + 1] <= threshold:
-        right += 1
+    # A real compositing cut is razor-thin -- a mixer switches source at an
+    # exact pixel column. A strong edge that's several pixels wide (a
+    # divider bar rendered as part of a graphic, a blurred/antialiased
+    # scene edge) is not that, even if its average gradient is high.
+    # Measured on real footage: a confirmed genuine seam came out ~2 columns
+    # wide (full-width-half-max); a false candidate inside a CG graphic's
+    # internal divider came out ~6 columns wide with a second nearby bump.
+    half = peak / 2.0
+    width = int(np.sum(profile > half))
+    if width > RIDGE_MAX_FWHM_PX:
+        return None
 
-    return (left, right)
+    # A real seam is there in essentially every sampled frame, not just
+    # strong on average -- a few outlier frames dragging the mean up (a
+    # robot passing near the boundary, a one-off compression artifact)
+    # shouldn't count as "the seam is always there".
+    frac_present = float(np.mean([p[idx] > half for p in per_frame_profiles]))
+    if frac_present < RIDGE_MIN_FRAME_CONSISTENCY:
+        return None
+
+    return idx
+
+
+def _seam_is_independent(frames_gray: list[np.ndarray], axis: int, idx: int) -> bool:
+    """
+    Confirm a candidate seam actually separates two independently-sourced
+    video feeds, rather than being a strong static edge inside one
+    continuous camera view (a yard line, a scoring-table divider, an
+    internal feature of a CG graphic).
+
+    Correlate frame-to-frame CHANGES on each side, not raw brightness
+    levels -- differencing cancels out anything shared and slow (gradual
+    exposure drift, shared camera shake) and isolates genuine independent
+    content change. Two different camera feeds change independently frame
+    to frame; two samples of one continuous feed generally don't, even
+    across a strong internal edge.
+    """
+    if len(frames_gray) < SEAM_MIN_FRAMES:
+        return False
+    m = SEAM_MARGIN_PX
+    limit = frames_gray[0].shape[1] if axis == 1 else frames_gray[0].shape[0]
+    if idx - m < 0 or idx + m >= limit:
+        return False
+
+    def strip_means(g):
+        if axis == 1:
+            return g[:, idx - m:idx].mean(), g[:, idx + 1:idx + 1 + m].mean()
+        return g[idx - m:idx, :].mean(), g[idx + 1:idx + 1 + m, :].mean()
+
+    signals = np.array([strip_means(g) for g in frames_gray], dtype=np.float64)
+    left_delta  = np.diff(signals[:, 0])
+    right_delta = np.diff(signals[:, 1])
+    if left_delta.std() < 1e-6 or right_delta.std() < 1e-6:
+        return False
+    corr = float(np.corrcoef(left_delta, right_delta)[0, 1])
+    return corr < SEAM_CORR_MAX
+
+
+def _find_separators(profile: np.ndarray, frames_gray: list[np.ndarray] | None,
+                     axis: int) -> list[tuple[int, int]]:
+    """
+    Find separator bands along one axis of one content strip.
+
+    Tries the static-CG-border signal first (possibly more than one band --
+    see _local_minima_bands). If none qualifies and frame data is available,
+    falls back to the borderless-seam search: a persistent-edge candidate,
+    confirmed via temporal decorrelation so a strong static edge inside one
+    real camera view doesn't get mistaken for a seam between two different
+    ones. A given broadcast is consistently one style or the other, so this
+    cascade -- run independently per strip -- ends up behaving consistently
+    across the whole frame without needing an explicit global decision.
+    """
+    bands = _local_minima_bands(profile)
+    if bands:
+        return bands
+    if frames_gray:
+        idx = _gradient_ridge_seam(frames_gray, axis)
+        if idx is not None and _seam_is_independent(frames_gray, axis, idx):
+            return [(idx, idx)]
+    return []
 
 
 def find_camera_rects(range_img: np.ndarray,
-                      min_fraction: float = MIN_VIEW_FRACTION) -> list[dict]:
+                      min_fraction: float = MIN_VIEW_FRACTION,
+                      frames_gray: list[np.ndarray] | None = None) -> list[dict]:
     """
     Hierarchical variance-based camera view detection.
 
-    1. Compute row-wise variance of the range image -> find the horizontal
-       separator band as the deepest trough (CG score strip between views).
-    2. For each content strip above/below, independently compute column-wise
-       variance -> find any vertical separator the same way.
+    1. Compute row-wise variance of the range image -> find horizontal
+       separator band(s) splitting the frame into row strips (see
+       _find_separators for the CG-border / borderless-seam cascade).
+    2. For each row strip, independently compute column-wise variance ->
+       find vertical separator band(s) the same way.
     3. Return bounding rects for all resulting camera-view regions.
+
+    `frames_gray`, if given, enables the borderless-seam fallback for
+    districts that don't draw a static graphic between camera feeds; without
+    it, only the static-CG-trough method runs (e.g. when reusing a
+    precomputed --range-image with no frame data behind it).
     """
     h, w = range_img.shape
     total = h * w
 
-    # --- Step 1: horizontal separator via row_var ---
-    row_var = np.var(range_img, axis=1)
-    h_band  = _trough_band(row_var)          # (y_sep_start, y_sep_end) or None
-
-    if h_band:
-        y_sep_s, y_sep_e = h_band
-        row_strips = []
-        if y_sep_s > 0:
-            row_strips.append((0, y_sep_s))
-        if y_sep_e + 1 < h:
-            row_strips.append((y_sep_e + 1, h))
-    else:
-        row_strips = [(0, h)]
+    row_var    = np.var(range_img, axis=1)
+    h_bands    = _find_separators(row_var, frames_gray, axis=0)
+    row_strips = _segments_from_bands(h_bands, h)
 
     rects = []
     for y0, y1 in row_strips:
-        strip = range_img[y0:y1, :]
+        strip        = range_img[y0:y1, :]
+        strip_frames = [g[y0:y1, :] for g in frames_gray] if frames_gray else None
 
-        # --- Step 2: vertical separator within this strip via col_var ---
-        col_var = np.var(strip, axis=0)
-        v_band  = _trough_band(col_var)      # (x_sep_start, x_sep_end) or None
-
-        if v_band:
-            x_sep_s, x_sep_e = v_band
-            col_segs = []
-            if x_sep_s > 0:
-                col_segs.append((0, x_sep_s))
-            if x_sep_e + 1 < w:
-                col_segs.append((x_sep_e + 1, w))
-        else:
-            col_segs = [(0, w)]
+        col_var  = np.var(strip, axis=0)
+        v_bands  = _find_separators(col_var, strip_frames, axis=1)
+        col_segs = _segments_from_bands(v_bands, w)
 
         for x0, x1 in col_segs:
             area = (x1 - x0) * (y1 - y0)
@@ -472,6 +650,7 @@ def main():
         range_img = None
     else:
         # Accumulate frames
+        frames_for_split = None   # None unless we have per-frame pixel data
         if args.range_image:
             ri = cv2.imread(args.range_image, cv2.IMREAD_GRAYSCALE)
             if ri is None:
@@ -483,6 +662,7 @@ def main():
             if not video_grays:
                 sys.exit("[error] no frames loaded from video")
             range_img = accumulate_range(video_grays)
+            frames_for_split = video_grays
             print(f"[accum] range: min={range_img.min():.1f} "
                   f"max={range_img.max():.1f} "
                   f"mean={range_img.mean():.1f}", file=sys.stderr)
@@ -497,6 +677,7 @@ def main():
             if not grays:
                 sys.exit("[error] no frames loaded")
             range_img = accumulate_range(grays)
+            frames_for_split = grays
             print(f"[accum] range: min={range_img.min():.1f} "
                   f"max={range_img.max():.1f} "
                   f"mean={range_img.mean():.1f}", file=sys.stderr)
@@ -506,7 +687,7 @@ def main():
             save_range_image(range_img, rp)
             print(f"[range] saved -> {rp}", file=sys.stderr)
 
-        rects = find_camera_rects(range_img, args.min_fraction)
+        rects = find_camera_rects(range_img, args.min_fraction, frames_for_split)
         views = label_views(rects, img_w, img_h)
         crops = named_crops(views)
 
