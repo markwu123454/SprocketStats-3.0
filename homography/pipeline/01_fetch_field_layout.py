@@ -33,11 +33,11 @@ pinhole estimate is derived from the crop dimensions and an assumed
 horizontal FOV of 70°.  This is sufficient for rough distance estimates;
 supply --intrinsics K.json for accurate poses. --intrinsics accepts
 either a single-camera file ({"K":..., "dist":...}, applied to every
-view) or a per-view file ({"main": {"K":..., "dist":...},
-"bot_left": {...}, ...}) — different camera views are different physical
+view) or a per-view file ({"view0": {"K":..., "dist":...},
+"view1": {...}, ...}) — different camera views are different physical
 lenses and generally should NOT share one K.
-pipeline/02_search_focal.py writes this per-view format, fit from
-AprilTag correspondences via a validated 1-D search (see
+pipeline/03_solve_pose.py's intrinsics search writes this per-view format,
+fit from AprilTag correspondences via a validated 1-D search (see
 docs/pose_calibration_research.md for the approaches that came before it
 and why they didn't hold up).
 
@@ -238,27 +238,19 @@ def accumulate_views(frames: list[np.ndarray],
     For each camera view, detect tags across all frames, accumulate unique
     IDs, keep the best detection (largest size_px) per tag, run solvePnP.
 
-    `intrinsics`, if given, is keyed by view name (e.g. {"main": {"K":...,
-    "dist":...}, "bot_left": {...}}), with an optional "*" entry applied to
+    `intrinsics`, if given, is keyed by view name (e.g. {"view0": {"K":...,
+    "dist":...}, "view1": {...}}), with an optional "*" entry applied to
     any view not otherwise listed — see `_load_intrinsics`. Different camera
     views are genuinely different physical lenses/zoom, so intrinsics never
     apply uniformly across views except via that explicit "*" fallback.
 
     Returns only views that have at least one decoded tag.
     """
-    # De-duplicate views sharing the same box (e.g. the synthetic "main" alias).
-    seen_boxes, unique_views = set(), []
-    for v in layout.get("views", []):
-        key = tuple(v["box"])
-        if key not in seen_boxes:
-            seen_boxes.add(key)
-            unique_views.append(v)
-
     detector = _make_detector()
 
     results = {}
 
-    for view in unique_views:
+    for view in layout.get("views", []):
         name         = view["name"]
         x0, y0, x1, y1 = view["box"]
         crop_w, crop_h  = x1 - x0, y1 - y0
@@ -331,9 +323,10 @@ def _load_intrinsics(path: str) -> dict:
     Two accepted shapes:
       - single-camera:  {"K": [[...]], "dist": [...]}
         -> applied to every view via the "*" fallback key.
-      - per-view:        {"main": {"K":..., "dist":...}, "bot_left": {...}, ...}
-        -> as produced by pipeline/02_search_focal.py. Views not listed fall
-           back to the estimated pinhole (or to a "*" entry if one is present).
+      - per-view:        {"view0": {"K":..., "dist":...}, "view1": {...}, ...}
+        -> as produced by pipeline/03_solve_pose.py's intrinsics search.
+           Views not listed fall back to the estimated pinhole (or to a
+           "*" entry if one is present).
     """
     data = json.loads(pathlib.Path(path).read_text())
     if "K" in data:
@@ -388,8 +381,7 @@ def main():
         sys.exit(f"[error] view profile not found: {layout_path}\n"
                  f"        run pipeline/00_split_views.py --video first")
     layout = json.loads(layout_path.read_text())
-    print(f"[layout] {layout.get('layout')}  "
-          f"views={[v['name'] for v in layout.get('views', [])]}",
+    print(f"[layout] views={[v['name'] for v in layout.get('views', [])]}",
           file=sys.stderr)
 
     # --- intrinsics (optional) ---

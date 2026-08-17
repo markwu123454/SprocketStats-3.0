@@ -19,19 +19,15 @@ Algorithm
 5. Find bounding rectangles of connected dynamic regions.
 6. Keep only rectangles larger than MIN_AREA_FRACTION of the full frame.
    These are the camera views.
-7. Sort and name them: main (largest / topmost), bot_left, bot_right, etc.
+7. Sort into a stable reading order (top-to-bottom, left-to-right) and
+   assign each an opaque index name (view0, view1, ...) purely so output
+   is deterministic across runs -- this is not a claim about which
+   physical camera feed a view is; downstream code never inspects the name.
 
 Outputs (JSON to stdout)
 ------------------------
 {
-  "layout":    "stacked" | "side_by_side" | "single",
-  "main":      [x0, y0, x1, y1],
-  "bot_left":  [x0, y0, x1, y1],    # stacked layout
-  "bot_right": [x0, y0, x1, y1],
-  "left":      [x0, y0, x1, y1],    # side_by_side layout
-  "center":    [x0, y0, x1, y1],
-  "right":     [x0, y0, x1, y1],
-  "views":     [ {"name": ..., "box": [x0,y0,x1,y1], "fraction": 0.xx}, ... ]
+  "views": [ {"name": "view0", "box": [x0,y0,x1,y1], "fraction": 0.xx}, ... ]
 }
 
 Usage
@@ -325,77 +321,29 @@ def find_camera_rects(range_img: np.ndarray,
 
 
 # ---------------------------------------------------------------------------
-# Layout classification and naming
+# View labeling
 # ---------------------------------------------------------------------------
 
-def classify_and_name(rects: list[dict], img_w: int, img_h: int) -> dict:
+def label_views(rects: list[dict], img_w: int, img_h: int) -> list[dict]:
     """
-    Given sorted (largest-first) camera rectangles, classify the layout and
-    assign names.
+    Assign each detected camera rectangle a stable, opaque name.
 
-    Rules (covers observed FRC broadcast styles):
-      single       -- 1 rect  -> "main"
-      stacked      -- 2+ rects where the largest is significantly taller in its
-                     vertical position than the others (top vs bottom)
-      side_by_side -- 2+ rects all at roughly the same vertical start position
+    Sorted into reading order (top-to-bottom, then left-to-right) only so
+    output is deterministic across runs. No attempt is made to classify the
+    broadcast layout or guess which physical camera feed a view is --
+    downstream pipeline steps treat the name as nothing more than a unique
+    key.
     """
     if not rects:
-        return {"layout": "single",
-                "views": [{"name": "main", "box": [0, 0, img_w, img_h],
-                            "fraction": 1.0}]}
-
-    if len(rects) == 1:
-        r = rects[0]
-        return {"layout": "single",
-                "views": [{"name": "main", **r}]}
-
-    # Sort by top-left position (top-to-bottom, left-to-right)
-    by_pos = sorted(rects, key=lambda r: (r["box"][1], r["box"][0]))
-
-    # Determine if there's a meaningful vertical split:
-    # "stacked" if the topmost rect is clearly above the next one.
-    top_y_of_second = by_pos[1]["box"][1]
-    bot_y_of_first  = by_pos[0]["box"][3]
-    has_vertical_split = top_y_of_second > bot_y_of_first * 0.6
-
-    if has_vertical_split:
-        # Stacked: first rect = main (top), remaining = bottom cameras
-        layout = "stacked"
-        named  = []
-        named.append({"name": "main", **by_pos[0]})
-
-        # Bottom cameras sorted left -> right
-        bottom = sorted(by_pos[1:], key=lambda r: r["box"][0])
-        names  = ["bot_left", "bot_right", "bot_extra"]
-        for i, r in enumerate(bottom):
-            named.append({"name": names[i] if i < len(names) else f"bot_{i}", **r})
-
-    else:
-        # Side by side: sort left -> right
-        layout = "side_by_side"
-        by_x   = sorted(rects, key=lambda r: r["box"][0])
-        if len(by_x) == 2:
-            names = ["left", "right"]
-        elif len(by_x) == 3:
-            names = ["left", "center", "right"]
-        else:
-            names = [f"view_{i}" for i in range(len(by_x))]
-
-        named = [{"name": n, **r} for n, r in zip(names, by_x)]
-
-        # "main" = the largest (most field content)
-        main_view = max(named, key=lambda r: r["area"])
-        for v in named:
-            if v["name"] == main_view["name"]:
-                named.append({"name": "main", **{k: v[k] for k in v if k != "name"}})
-                break
-
-    return {"layout": layout, "views": named}
+        rects = [{"box": [0, 0, img_w, img_h], "area": img_w * img_h,
+                  "fraction": 1.0}]
+    ordered = sorted(rects, key=lambda r: (r["box"][1], r["box"][0]))
+    return [{"name": f"view{i}", **r} for i, r in enumerate(ordered)]
 
 
-def named_crops(classification: dict) -> dict:
+def named_crops(views: list[dict]) -> dict:
     """Flatten views list into a {name: [x0,y0,x1,y1]} dict."""
-    return {v["name"]: v["box"] for v in classification["views"]}
+    return {v["name"]: v["box"] for v in views}
 
 
 # ---------------------------------------------------------------------------
@@ -429,31 +377,24 @@ def save_profile(event_match: str, result: dict, img_w: int, img_h: int):
 # Visualization
 # ---------------------------------------------------------------------------
 
-_COLORS = {
-    "main":      (0, 230,  0),
-    "bot_left":  (0, 160, 255),
-    "bot_right": (0, 160, 255),
-    "bot_extra": (0, 100, 200),
-    "left":      (0, 160, 255),
-    "center":    (255, 200,  0),
-    "right":     (0, 160, 255),
-}
+_COLORS = [
+    (0, 230,  0), (0, 160, 255), (255, 200, 0), (0, 100, 200), (200, 100, 255),
+]
 
 def visualize(img_bgr: np.ndarray, range_img: np.ndarray,
-              classification: dict) -> np.ndarray:
+              views: list[dict]) -> np.ndarray:
     h, w = img_bgr.shape[:2]
 
     left = img_bgr.copy()
-    for v in classification["views"]:
+    for i, v in enumerate(views):
         x0, y0, x1, y1 = v["box"]
-        color = _COLORS.get(v["name"], (200, 200, 200))
+        color = _COLORS[i % len(_COLORS)]
         cv2.rectangle(left, (x0, y0), (x1, y1), color, 2)
         cv2.putText(left, f"{v['name']} {v['fraction']:.0%}",
                     (x0 + 6, y0 + 20),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1, cv2.LINE_AA)
 
-    layout = classification["layout"]
-    cv2.putText(left, f"layout={layout}  views={len(classification['views'])}",
+    cv2.putText(left, f"views={len(views)}",
                 (8, h - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
 
     # Right panel: range image scaled for inspection
@@ -526,10 +467,9 @@ def main():
     # ---- load or compute ----
     cached = None if args.no_cache else load_profile(event_match, img_w, img_h)
     if cached:
-        classification = {"layout": cached["layout"], "views": cached["views"]}
-        crops = named_crops(classification)
+        views     = cached["views"]
+        crops     = named_crops(views)
         range_img = None
-        mask_img  = None
     else:
         # Accumulate frames
         if args.range_image:
@@ -566,16 +506,13 @@ def main():
             save_range_image(range_img, rp)
             print(f"[range] saved -> {rp}", file=sys.stderr)
 
-        rects          = find_camera_rects(range_img, args.min_fraction)
-        classification = classify_and_name(rects, img_w, img_h)
-        mask_img       = None
-        crops          = named_crops(classification)
+        rects = find_camera_rects(range_img, args.min_fraction)
+        views = label_views(rects, img_w, img_h)
+        crops = named_crops(views)
 
-        print(f"[split] layout={classification['layout']}  "
-              f"views={[v['name'] for v in classification['views']]}",
-              file=sys.stderr)
+        print(f"[split] views={[v['name'] for v in views]}", file=sys.stderr)
 
-        save_profile(event_match, classification, img_w, img_h)
+        save_profile(event_match, {"views": views}, img_w, img_h)
 
     # ---- optional outputs ----
     if args.save_crops:
@@ -589,7 +526,7 @@ def main():
             print(f"[crop] {name} -> {p}", file=sys.stderr)
 
     if (args.viz or args.viz_out) and range_img is not None:
-        vis = visualize(ref_img, range_img, classification)
+        vis = visualize(ref_img, range_img, views)
         out = args.viz_out or str(ref_path.with_suffix("")) + "_split.jpg"
         cv2.imwrite(out, vis)
         print(f"[viz] {out}", file=sys.stderr)

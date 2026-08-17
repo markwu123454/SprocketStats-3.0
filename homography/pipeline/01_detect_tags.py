@@ -46,14 +46,25 @@ detections; it never removes one the single-shot pass would have found.
              (sharpening a blurred tag amplifies the blur, not the signal)
 
   combos run: sharp x native, sharp x upscale2x, sharp x upscale3x,
-              sharp x clahe, sharp x unsharp, soft x native
-  (soft is skipped on upscale/clahe/unsharp -- motion blur isn't fixed by
-  scale or contrast, so those combos rarely earn the soft-config runtime cost)
+              sharp x upscale4x, sharp x clahe, sharp x unsharp,
+              sharp x gamma, sharp x bilateral,
+              soft x native, soft x upscale2x
+  (soft is skipped on clahe/unsharp/gamma/bilateral -- motion blur isn't fixed
+  by contrast/sharpening preprocessing, so those combos rarely earn the cost)
 
   upscale3x: benchmarked across 4 matches (+6.5% frame-detections vs baseline).
   unsharp: largest contributor (+14.9%) -- sharpening before the quad detector
   helps find tag borders the baseline misses entirely (tag 6 in match3/main
   was found in 23/40 sampled frames exclusively by this combo).
+  upscale4x: extends upscale3x for tags at the detection limit (~14px, e.g.,
+  wall tags 13/14); at 4x they are ~56px giving the bit-cell decoder margin.
+  gamma: global gamma=0.5 brightens shadowed tags; complementary to CLAHE
+  which only does local contrast -- a tag in deep shadow benefits from both.
+  bilateral: bilateral filter (d=9, sigmaColor=75) removes H.264 DCT block
+  artifacts from flat regions before the gradient quad detector runs; those
+  blocks create spurious high-frequency gradients that can mask tag borders.
+  soft+upscale2x: motion blur + small tag is a real failure combo; the soft
+  config avoids amplifying the blur while upscale gives the decoder more pixels.
 
 Outputs
 -------
@@ -115,6 +126,9 @@ SOFT_DECODE_SHARPENING = 0.5
 
 UPSCALE_FACTOR   = 2.0
 UPSCALE_FACTOR_3 = 3.0
+UPSCALE_FACTOR_4 = 4.0
+
+GAMMA_VALUE = 0.5  # < 1 boosts shadows; complements CLAHE's local contrast
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +186,35 @@ def _unsharp(gray: np.ndarray, strength: float = 1.5, sigma: float = 2.0) -> np.
                    0, 255).astype(np.uint8)
 
 
+_GAMMA_LUT = np.array(
+    [int((i / 255.0) ** GAMMA_VALUE * 255 + 0.5) for i in range(256)],
+    dtype=np.uint8,
+)
+
+
+def _gamma_boost(gray: np.ndarray) -> np.ndarray:
+    """Global power-law gamma < 1: lifts shadows without touching local contrast.
+
+    CLAHE only adjusts local contrast tiles; a tag in a uniformly dark region
+    (deep shadow, underexposed end wall) benefits from a global brightness lift
+    first. gamma=0.5 doubles perceived brightness in mid-tones.
+    """
+    return cv2.LUT(gray, _GAMMA_LUT)
+
+
+def _bilateral(gray: np.ndarray) -> np.ndarray:
+    """Edge-preserving bilateral filter to remove H.264 DCT block noise.
+
+    H.264/H.265 compression of broadcast footage creates 8x8 or 16x16 block
+    artifacts in flat regions (walls, arena floor). Those block boundaries are
+    spurious high-frequency gradients that can mask or split tag borders when
+    AT3's gradient-based quad detector runs. Bilateral filter suppresses them
+    while leaving the real sharp tag edges intact (large sigmaColor step in
+    intensity is treated as an edge and not smoothed across).
+    """
+    return cv2.bilateralFilter(gray, d=9, sigmaColor=75, sigmaSpace=75)
+
+
 def _ensemble_combos(gray: np.ndarray,
                      detectors: dict[str, AT3Detector]) -> list[tuple[str, AT3Detector, np.ndarray, float]]:
     """
@@ -180,19 +223,27 @@ def _ensemble_combos(gray: np.ndarray,
     `scale` is the factor the image was upscaled by, so detected corners can
     be divided back down to native crop coordinates.
     """
-    upscaled2 = cv2.resize(gray, None, fx=UPSCALE_FACTOR,   fy=UPSCALE_FACTOR,
-                           interpolation=cv2.INTER_CUBIC)
-    upscaled3 = cv2.resize(gray, None, fx=UPSCALE_FACTOR_3, fy=UPSCALE_FACTOR_3,
-                           interpolation=cv2.INTER_CUBIC)
-    enhanced  = _CLAHE.apply(gray)
-    sharpened = _unsharp(gray)
+    upscaled2  = cv2.resize(gray, None, fx=UPSCALE_FACTOR,   fy=UPSCALE_FACTOR,
+                            interpolation=cv2.INTER_CUBIC)
+    upscaled3  = cv2.resize(gray, None, fx=UPSCALE_FACTOR_3, fy=UPSCALE_FACTOR_3,
+                            interpolation=cv2.INTER_CUBIC)
+    upscaled4  = cv2.resize(gray, None, fx=UPSCALE_FACTOR_4, fy=UPSCALE_FACTOR_4,
+                            interpolation=cv2.INTER_CUBIC)
+    enhanced   = _CLAHE.apply(gray)
+    sharpened  = _unsharp(gray)
+    gamma_img  = _gamma_boost(gray)
+    bilateral_ = _bilateral(gray)
     return [
-        ("sharp+native",    detectors["sharp"], gray,      1.0),
-        ("sharp+upscale2x", detectors["sharp"], upscaled2, UPSCALE_FACTOR),
-        ("sharp+upscale3x", detectors["sharp"], upscaled3, UPSCALE_FACTOR_3),
-        ("sharp+clahe",     detectors["sharp"], enhanced,  1.0),
-        ("sharp+unsharp",   detectors["sharp"], sharpened, 1.0),
-        ("soft+native",     detectors["soft"],  gray,      1.0),
+        ("sharp+native",    detectors["sharp"], gray,       1.0),
+        ("sharp+upscale2x", detectors["sharp"], upscaled2,  UPSCALE_FACTOR),
+        ("sharp+upscale3x", detectors["sharp"], upscaled3,  UPSCALE_FACTOR_3),
+        ("sharp+upscale4x", detectors["sharp"], upscaled4,  UPSCALE_FACTOR_4),
+        ("sharp+clahe",     detectors["sharp"], enhanced,   1.0),
+        ("sharp+unsharp",   detectors["sharp"], sharpened,  1.0),
+        ("sharp+gamma",     detectors["sharp"], gamma_img,  1.0),
+        ("sharp+bilateral", detectors["sharp"], bilateral_, 1.0),
+        ("soft+native",     detectors["soft"],  gray,       1.0),
+        ("soft+upscale2x",  detectors["soft"],  upscaled2,  UPSCALE_FACTOR),
     ]
 
 
@@ -343,15 +394,10 @@ def main():
                  f"        run pipeline/00_split_views.py --video first")
     layout = json.loads(layout_path.read_text())
 
-    seen_boxes, unique_views = set(), []
-    for v in layout.get("views", []):
-        key = tuple(v["box"])
-        if key not in seen_boxes:
-            seen_boxes.add(key)
-            unique_views.append(v)
+    views = layout.get("views", [])
     if args.view:
-        unique_views = [v for v in unique_views if v["name"] == args.view]
-        if not unique_views:
+        views = [v for v in views if v["name"] == args.view]
+        if not views:
             sys.exit(f"[error] view {args.view!r} not in profile")
 
     frames = sample_frames(args.video, args.n_frames,
@@ -363,7 +409,7 @@ def main():
                                          args.decode_sharpening)
 
     views_out = {}
-    for view in unique_views:
+    for view in views:
         views_out[view["name"]] = process_view(view, frames, detectors, ensemble)
 
     total = sum(len(v["decoded_tags"]) for v in views_out.values())
@@ -384,7 +430,11 @@ def main():
             "soft_decode_sharpening":  SOFT_DECODE_SHARPENING if ensemble else None,
             "upscale_factor_2x":       UPSCALE_FACTOR   if ensemble else None,
             "upscale_factor_3x":       UPSCALE_FACTOR_3 if ensemble else None,
+            "upscale_factor_4x":       UPSCALE_FACTOR_4 if ensemble else None,
             "unsharp_strength":        1.5 if ensemble else None,
+            "gamma_value":             GAMMA_VALUE if ensemble else None,
+            "bilateral_d":             9 if ensemble else None,
+            "bilateral_sigma_color":   75 if ensemble else None,
             "refine_edges":            1,
         },
         "views": views_out,
