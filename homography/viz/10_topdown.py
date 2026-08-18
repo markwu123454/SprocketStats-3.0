@@ -263,7 +263,7 @@ def main():
     for p in (tags_path, poses_path):
         if not p.exists():
             sys.exit(f"[error] not found: {p}\n"
-                     f"        run the pipeline steps (01_detect_tags, 02_search_focal, "
+                     f"        run the pipeline steps (01_detect_tags, "
                      f"03_solve_pose) first")
     tags_data  = json.loads(tags_path.read_text())
     poses      = json.loads(poses_path.read_text())

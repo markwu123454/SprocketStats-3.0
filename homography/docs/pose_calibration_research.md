@@ -99,7 +99,7 @@ anywhere" symptom that kicked off this whole investigation:
 ~940px wide) — physically impossible for independent crops, because
 `--focal-px 1004` had been passed once and reused, never fit per-view.
 
-### 6. 1-D ladder search ✓ **adopted** — `pipeline/02_search_focal.py`
+### 6. 1-D ladder search ✓ **adopted** — now `pipeline/03_solve_pose.py`'s intrinsics search (originally a separate `pipeline/02_search_focal.py`, merged in since the two were never really separable — see that file's module docstring)
 
 Start from the simplest model that could possibly be right — `fx=fy=f`,
 `cx=W/2, cy=H/2`, `dist=0`, one free parameter — and search it with a real
@@ -190,12 +190,83 @@ AT3's corners.
 
 ---
 
+### 7. Joint bounded fit, gated on held-out error ✓ **adopted, supersedes #6**
+
+Approach #6 above was right about the ladder and wrong about three things,
+each of which produced a confidently wrong answer on real footage. What
+replaced them, in the order the failures were found:
+
+- **The field layout was assumed, not measured.** `--year` defaulted to 2026,
+  and `match3` is 2025 footage whose decoded tag IDs are *all* ≤ 22 — every
+  one of which also exists in the 2026 layout at a different field position.
+  No ID check can catch that. It corrupts every correspondence, and the fit
+  responded with `f` pinned to the search floor and 284px RMS, cached with no
+  diagnostic. `detect_field_layout()` now scores every layout on disk by
+  geometry: match3 goes 450px → 0.5px on the right one, and match2/match4 go
+  7–8px on 2026 vs 645–652px on 2025. `match7` turns out to be 2024, which
+  was not even a candidate until layout detection learned to read raw WPILib
+  `<year>_layout.json` as well as the converted `<year>_tags.json`.
+
+- **Averaging assumed a static camera.** The broadcast cuts, and in 2025 the
+  bottom strip re-lays-out from two panes to three at endgame (a climb camera
+  appears between them), moving every pane. Averaging across that puts each
+  tag's "mean" between two framings, and `MAX_SPREAD_PX` then reads the gap
+  between clusters as detection jitter — dropping exactly the tags seen in
+  *both* shots and keeping the ones seen in only one, which look stable
+  because they have nothing to disagree with. On `match3/bot_left` that
+  turned 7 tags spanning 1822×293px into a 3-tag cluster. `split_static_
+  segments()` now splits on cuts and fits each shot as its own camera, taking
+  the *dominant* shot as the view's pose (head and tail shots are pre/post
+  match filler). This also un-broke `match4`'s two insets, whose "geometric
+  degeneracy" was really teleop and endgame observations averaged together.
+
+- **Coordinate descent over separate 1-D searches.** `f`, `cy` and pitch all
+  shift the projection vertically, so the cost surface is a diagonal valley
+  that axis-aligned steps crawl along rather than cross — `match2/main` and
+  `match4/main` are the same geometry but stopped at cy=352/pitch 14.8° and
+  cy=734/pitch 30.1°. And the (cx, cy) grid re-centred on the *current
+  iterate* each round, so its "±40% of the crop" bound compounded until
+  `match4/bot_left` reached cx=1159 on a 940px-wide crop. Solving all
+  parameters jointly under absolute bounds (`fit_intrinsics_joint`) fixed
+  both: residuals fell on every view that fits (`match2/main` 2.25 → 1.03px)
+  and focal agreement across the four `main` fits tightened from 20% to 7%.
+
+The deeper change is what counts as evidence. #6 admitted `cx,cy` and `k1` on
+correspondence-*count* thresholds, which cannot distinguish points spread
+across the frame from the same number packed into a corner of it —
+`match4/bot_right` cleared the 20-point bar with 5 tags in a 414×44px band
+and was handed a free principal point and a free k1. Parameters are now
+admitted on their own error bars from the covariance, and the *fit* is judged
+by leave-one-tag-out held-out error, which is the same test that justified k1
+originally, now run at runtime instead of once by hand.
+
+Held-out error also outranks in-sample residual where they disagree:
+`match6/main` sits at 15.9px in-sample yet predicts a tag it never saw to
+5.3px, and the direct measurement is better evidence than the proxy.
+
+Two things the local covariance provably cannot see, so they are measured by
+refitting instead: a cost surface with a second basin (`match2/bot_right`
+reports σ_f under 15% at its solution, yet dropping any one of its four tags
+moves f from 589px to 1700–1900px) and a fit resting on a single tag
+(`fit_depends_on_single_tag`).
+
+Finally, the module now **refuses**. An optimizer always returns its best
+point; that is not the same as having found a fit. A refused view is absent
+from the poses file with its reasons recorded, rather than emitting the
+cameras-below-the-floor and 59°-pitch results this pipeline used to produce
+silently. Across the 7 matches in `data/detections/`, 18 views: 13 fit, 5
+refused, and every refusal is a view that genuinely cannot be solved from its
+own correspondences.
+
+---
+
 ## Current pipeline
 
 ```
+pipeline/00_split_views.py   -> data/profiles/<stem>_layout.json
 pipeline/01_detect_tags.py   -> data/detections/<stem>_tags.json
-pipeline/02_search_focal.py  -> data/calibration/<stem>_intrinsics.json
-pipeline/03_solve_pose.py    -> data/detections/<stem>_poses.json
+pipeline/03_solve_pose.py    -> data/calibration/<stem>_intrinsics.json (fit)
+                                 data/detections/<stem>_poses.json      (pose)
 viz/03_overlay.py            -> data/overlays/<stem>_<view>_overlay.jpg  (sanity check)
 viz/07_field3d.py            -> viz/field3d.html                        (the visualizer)
 viz/09_calibrate_ui.py       -> manual slider fallback, when a view has too
@@ -206,15 +277,21 @@ viz/09_calibrate_ui.py       -> manual slider fallback, when a view has too
 
 ## Remaining known limitations
 
-- **Views with only 2–5 tags** (this project's `bot_left`/`bot_right` on
-  every match tried) remain fundamentally underdetermined for joint
-  pose+intrinsics fitting. More points *per tag* (corner mode) improves
-  conditioning slightly but does not fix a genuinely implausible pose —
-  confirmed by sweeping the squareness threshold to 0.0 (all available
-  corners used): the solved camera position barely moved and stayed
-  physically outside the field. More points from the *same* few tag
-  locations isn't the same as more geometric diversity; there's no
-  parameter-search fix for that, only more/different tags.
+- **`00_split_views.py` cannot handle a pane layout that changes mid-video.**
+  In 2025 the bottom strip is two panes during auto/teleop and three during
+  endgame (left / climb camera / right). `match3` defeated the splitter
+  entirely: it returned a single full-width 1920×347 bottom strip containing
+  *both* PIP cameras' tags, which is why `match3/bot_right` appears to be
+  "missing" and why `bot_left` can never be solved — no single camera pose
+  explains tags from two cameras (best 4-tag subset 11.7px, all 7 together
+  230px). `03` correctly refuses it, but the fix belongs upstream.
+- **Views with only 4–5 clustered tags** solve, but their focal length does
+  not survive dropping a tag (`fit_depends_on_single_tag`, focal swings of
+  20–25%). The camera *position* from these is corroborated — `bot_right`
+  lands at x≈16.0–16.9 across match1/2/4 independently — but the focal should
+  not be quoted. More points from the same few tag locations is not the same
+  as more geometric diversity; there is no parameter-search fix, only
+  more/different tags.
 - **Extrapolation beyond tag coverage**: a genuinely correct camera model is
   a real geometric law and must project correctly to *any* point in the
   rigid scene, not just the ones it was fit to — so divergence specifically

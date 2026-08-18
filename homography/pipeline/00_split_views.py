@@ -19,30 +19,26 @@ Algorithm
    as one or more troughs (see _local_minima_bands) -- not just the single
    deepest one, so a row with three items (view | cg | view) still splits
    correctly.
-4. Districts that composite feeds edge-to-edge with no static graphic
-   between them have no such trough. When none is found, fall back to a
-   persistent-edge search (_gradient_ridge_seams): a compositing seam sits
-   at the same pixel column/row in every frame, unlike real scene content
-   which drifts frame to frame and smears out under averaging. More than
-   one such seam can exist per axis (e.g. view | rotating cg | view, where
-   neither boundary has a static graphic). A candidate must also be razor
-   thin and present in nearly every sampled frame -- a real compositing cut
-   is ~1-4px wide, unlike a soft/wide feature rendered as part of a
-   graphic -- and pass temporal decorrelation (_seam_is_independent) so a
-   strong static edge inside one real camera view isn't mistaken for a seam
-   between two different ones.
-5. Keep only resulting rectangles larger than MIN_VIEW_FRACTION of the
+4. Keep only resulting rectangles larger than MIN_VIEW_FRACTION of the
    full frame.
-6. Drop any surviving rectangle whose content looks like a CG graphic
+5. Drop any surviving rectangle whose content looks like a CG graphic
    rather than live camera footage (exclude_cg_regions): a rotating
    sponsor panel or scorebug has a background plus a handful of
    flat-colored logos/text, so its color-histogram entropy stays low in
    every sampled frame regardless of which specific graphic is showing;
    real video doesn't. What's left are the camera views.
-7. Sort into a stable reading order (top-to-bottom, left-to-right) and
+6. Sort into a stable reading order (top-to-bottom, left-to-right) and
    assign each an opaque index name (view0, view1, ...) purely so output
    is deterministic across runs -- this is not a claim about which
    physical camera feed a view is; downstream code never inspects the name.
+
+find_camera_rects only uses static-CG-band detection (_local_minima_bands).
+A separate, NOT WIRED IN set of functions further down the file
+(_activity_seam_segments / _cluster_seam_segments / _filter_seam_lines /
+_connect_regions) is an in-progress replacement aimed at districts that
+composite feeds edge-to-edge with no static graphic between them, or whose
+seams don't span the full frame width/height -- see the comment above
+_connect_regions for where that stands.
 
 Outputs (JSON to stdout)
 ------------------------
@@ -77,37 +73,25 @@ STATIC_THRESHOLD = 12
 # count as a camera view (filters noise and tiny UI elements).
 MIN_VIEW_FRACTION = 0.08
 
-# --- Borderless-seam fallback (no static CG graphic between views) ---
-# Validated against real match footage (see homography/docs) -- a confirmed
-# genuine seam came out ~2px wide and present in ~100% of sampled frames; a
-# false candidate inside a CG graphic's internal divider came out ~6px wide
-# and merely "usually" present. Peak-ratio and correlation thresholds are
-# still starting points, not independently validated.
-RIDGE_MIN_PEAK_RATIO      = 4.0   # candidate seam's gradient peak vs. neighborhood median
-RIDGE_EDGE_FRAC           = 0.05  # ignore this fraction of the strip at each edge
-RIDGE_MAX_FWHM_PX         = 5     # max width (px) of the averaged gradient peak
-RIDGE_MIN_FRAME_CONSISTENCY = 0.9 # fraction of sampled frames the edge must appear in
-SEAM_CORR_MAX             = 0.6   # frame-to-frame delta correlation across the seam must be below this
-SEAM_MARGIN_PX            = 4     # strip width sampled on each side of a candidate seam
-SEAM_MIN_FRAMES           = 8     # too few frames makes the correlation meaningless
-RIDGE_MIN_SEAM_SEPARATION_PX = 30 # candidates closer than this can't both be real (see _gradient_ridge_seams)
-RIDGE_SEAM_MERGE_PX          = 3  # candidates closer than this are one edge detected twice, not two edges
+# Ignore this fraction of a strip at each edge when scanning for static-CG
+# troughs (_local_minima_bands) -- broadcast letterboxing/edge artifacts live
+# right at the frame border and shouldn't be mistaken for a real separator.
+BAND_EDGE_FRAC = 0.05
 
-# Hough/Radon-style full-span coverage gate: a real compositing seam is a
-# strong edge across essentially its ENTIRE length (the whole frame width/
-# height switches source at that line), unlike a localized scene feature
-# that only produces a strong gradient over part of its length. Measured
-# on real footage: two confirmed-false candidates (structural edges inside
-# a genuinely single continuous view) covered only 8-19% of their length
-# at >=50% of their own peak value; two confirmed/likely-real seams covered
-# 37-53%. Clean separation, no overlap in this sample.
-SPATIAL_COVERAGE_HALF_FRAC = 0.5   # a point "counts" if it's above this fraction of the line's own peak
-SPATIAL_COVERAGE_MIN_FRAC  = 0.25  # the line must have at least this fraction of its length counted
+# A local minimum only qualifies as a static-CG trough if it's below this
+# fraction of the profile's peak. Measured on match1: the true separator
+# bottoms out at ~0.08-0.1% of peak, but a scoreboard's score/clock digits
+# -- which change value over the match even though the bar they sit in is
+# positionally static -- locally spike row_var, splitting the bar into two
+# spurious troughs at ~1.3% and ~3.4% of peak. 0.05 let both through; 0.02
+# sits with comfortable margin below the false troughs and >10x above the
+# real one.
+BAND_MAX_TROUGH_FRAC = 0.02
 
-# --- Borderless-seam content check ---
-# A gradient ridge is only a compositing cut if the two sides are genuinely
+# --- Seam content/independence checks (used by _filter_seam_lines) ---
+# A candidate edge is only a compositing cut if the two sides are genuinely
 # different footage. A strong line INSIDE one continuous camera view -- a field
-# center line, a guardrail -- produces an identical ridge, and on a locked wide
+# center line, a guardrail -- produces an identical edge, and on a locked wide
 # shot temporal independence can't reject it either (the two halves of one field
 # have independent local motion). The static scene is what tells them apart:
 # across a real cut the two sides are unrelated, across a field line the SAME
@@ -115,19 +99,12 @@ SPATIAL_COVERAGE_MIN_FRAC  = 0.25  # the line must have at least this fraction o
 # center line scored ~0.03-0.09; genuine borderless seams scored ~0.39-0.68.
 # Known limit: two adjacent feeds of near-identical content (e.g. two field
 # cams) would also score low -- not seen in practice, and inherently ambiguous.
-CONTENT_DISSIM_MIN  = 0.25   # 1 - corr(mean-image strips across the seam)
-CONTENT_DISSIM_HALF = 20     # px of static content sampled each side
-CONTENT_DISSIM_GAP  = 4      # px skipped at the seam so a painted line can't inflate it
-
-# --- Horizontal borderless-cut refinement ---
-# A row-axis ridge snaps to the strongest horizontal edge, which on a main field
-# view is the guardrail/field border -- not the compositing cut, which sits lower
-# where the bottom strip of feeds begins. The bottom strip carries vertical
-# compositing seams; the field above does not. So the true cut is the row where
-# per-row vertical-edge structure turns on. Measured: 619 (true cut) vs 596
-# (border edge the ridge latched onto) -- a ~23px correction.
-HCUT_REFINE_SEARCH   = 32    # px window around the ridge candidate to search
-HCUT_REFINE_MIN_STEP = 1.25  # vertical structure below the cut must exceed above by this
+SEAM_CORR_MAX       = 0.6   # frame-to-frame delta correlation across the seam must be below this
+SEAM_MARGIN_PX      = 4     # strip width sampled on each side of a candidate seam
+SEAM_MIN_FRAMES     = 8     # too few frames makes the correlation meaningless
+CONTENT_DISSIM_MIN  = 0.25  # 1 - corr(mean-image strips across the seam)
+CONTENT_DISSIM_HALF = 20    # px of static content sampled each side
+CONTENT_DISSIM_GAP  = 4     # px skipped at the seam so a painted line can't inflate it
 
 # --- CG-region classification (color concentration) ---
 # Below this per-frame color-histogram entropy (bits), a region is treated
@@ -312,8 +289,8 @@ def save_range_image(range_img: np.ndarray, path: pathlib.Path):
 # ---------------------------------------------------------------------------
 
 def _local_minima_bands(profile: np.ndarray, grow_factor: float = 8.0,
-                        edge_frac: float = RIDGE_EDGE_FRAC,
-                        max_trough_frac: float = 0.05) -> list[tuple[int, int]]:
+                        edge_frac: float = BAND_EDGE_FRAC,
+                        max_trough_frac: float = BAND_MAX_TROUGH_FRAC) -> list[tuple[int, int]]:
     """
     Find every local minimum in `profile` that's a plausible static CG
     separator, and grow each outward the same way a single deepest trough
@@ -387,145 +364,54 @@ def _segments_from_bands(bands: list[tuple[int, int]], length: int) -> list[tupl
     return segs
 
 
-def _gradient_ridge_seams(frames_gray: list[np.ndarray], axis: int) -> list[int]:
+def find_camera_rects(range_img: np.ndarray,
+                      min_fraction: float = MIN_VIEW_FRACTION,
+                      frames_gray: list[np.ndarray] | None = None) -> list[dict]:
     """
-    Find every candidate compositing-seam location for a view split that
-    has no static CG graphic drawn at the boundary -- not just the single
-    strongest one, since a layout can have more than one borderless seam
-    per axis (e.g. view | rotating cg | view, where neither boundary has a
-    static graphic to anchor a temporal-range trough).
+    Hierarchical variance-based camera view detection, using static-CG-band
+    detection only (_local_minima_bands) -- no seam/ridge search involved.
 
-    _local_minima_bands finds STATIC pixels; this finds PERSISTENT EDGES
-    instead. A broadcast mixer seam sits at the exact same pixel column/row
-    in every frame, so the mean gradient magnitude there, averaged over many
-    frames, stays high. A real scene edge doesn't: it drifts by a pixel or
-    more frame to frame from compression and stabilization jitter, so
-    averaging smears it out. That gap is what separates a seam from ordinary
-    in-view content -- but it's not sufficient on its own (see below).
+    1. Compute row-wise variance of the range image -> find horizontal
+       separator band(s) (troughs) splitting the frame into row strips.
+    2. For each row strip, independently compute column-wise variance ->
+       find vertical separator band(s) the same way.
+    3. Return bounding rects for all resulting camera-view regions.
 
-    `axis=0` looks for a horizontal separator (top/bottom split, scans rows
-    via the vertical gradient); `axis=1` looks for a vertical separator
-    (left/right split, scans columns via the horizontal gradient).
+    `frames_gray` is accepted for call-site compatibility but unused here --
+    band detection needs only the accumulated range image.
 
-    Each candidate local maximum must also be:
-      - razor thin (RIDGE_MAX_FWHM_PX): a real compositing cut is a mixer
-        switching source at an exact pixel column. A strong edge that's
-        several pixels wide -- a divider bar rendered as part of a graphic,
-        a blurred/antialiased scene edge -- is not that, even with a high
-        average gradient. Measured on real footage: a confirmed genuine
-        seam came out ~2-4 columns wide (full-width-half-max); a false
-        candidate inside a CG graphic's internal divider came out ~6
-        columns wide with a second nearby bump.
-      - present in nearly every sampled frame (RIDGE_MIN_FRAME_CONSISTENCY):
-        not just strong on average -- a few outlier frames dragging the
-        mean up (a robot passing near the boundary, a one-off compression
-        artifact) shouldn't count as "the seam is always there".
-      - strong across most of its own length (SPATIAL_COVERAGE_MIN_FRAC):
-        a Hough/Radon-style full-span check -- a real seam is a strong edge
-        essentially everywhere along the row/column, since the whole frame
-        width/height switches source there, unlike a localized scene
-        feature that only produces a strong gradient over part of its
-        length while still averaging to a high peak.
-
-    Returns candidate indices, still needing `_seam_is_independent`
-    confirmation -- these gates alone don't distinguish two different
-    camera sources from one continuous feed with a genuinely sharp edge.
+    LIMITATION: this is a guillotine and every separator must span the full
+    width/height of its strip. A layout whose seams don't (e.g. a bottom row
+    with a center CG panel vertically offset from its neighbours -- match8),
+    or that composites feeds edge-to-edge with no static graphic between them
+    at all, has no full-span trough, so the affected split is missed and the
+    frame under-segments. The DETECT/CLUSTER/FILTER/CONNECT functions further
+    below are an unwired experimental replacement aimed at that case.
     """
-    per_frame_profiles = []
-    acc = None
-    for g in frames_gray:
-        gray = g.astype(np.float32)
-        if axis == 1:
-            grad = np.abs(cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3))
-        else:
-            grad = np.abs(cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3))
-        acc = grad if acc is None else acc + grad
-        per_frame_profiles.append(grad.mean(axis=0) if axis == 1 else grad.mean(axis=1))
-    mean_grad = acc / len(frames_gray)
-    profile = mean_grad.mean(axis=0) if axis == 1 else mean_grad.mean(axis=1)
+    h, w = range_img.shape
+    total = h * w
 
-    n = len(profile)
-    lo, hi = int(n * RIDGE_EDGE_FRAC), int(n * (1 - RIDGE_EDGE_FRAC))
-    if hi <= lo:
-        return []
+    row_var    = np.var(range_img, axis=1)
+    h_bands    = _local_minima_bands(row_var)
+    row_strips = _segments_from_bands(h_bands, h)
 
-    candidates = []
-    for idx in range(lo, hi):
-        left  = profile[idx - 1] if idx > 0 else profile[idx]
-        right = profile[idx + 1] if idx < n - 1 else profile[idx]
-        if profile[idx] < left or profile[idx] < right:
-            continue  # not a local maximum
-        peak = profile[idx]
+    rects = []
+    for y0, y1 in row_strips:
+        strip = range_img[y0:y1, :]
 
-        mask = np.ones(n, dtype=bool)
-        mask[max(0, idx - 3):idx + 4] = False
-        neighborhood = profile[mask]
-        baseline = float(np.median(neighborhood)) if neighborhood.size else 0.0
-        if baseline <= 0 or peak / baseline < RIDGE_MIN_PEAK_RATIO:
-            continue
+        col_var  = np.var(strip, axis=0)
+        v_bands  = _local_minima_bands(col_var)
+        col_segs = _segments_from_bands(v_bands, w)
 
-        # Width of THIS peak specifically -- grow outward from idx, not a
-        # global count, so a second unrelated peak elsewhere in the profile
-        # can't inflate this candidate's measured width.
-        half = peak / 2.0
-        l = idx
-        while l > 0 and profile[l - 1] > half:
-            l -= 1
-        r = idx
-        while r < n - 1 and profile[r + 1] > half:
-            r += 1
-        if r - l + 1 > RIDGE_MAX_FWHM_PX:
-            continue
+        for x0, x1 in col_segs:
+            area = (x1 - x0) * (y1 - y0)
+            frac = area / total
+            if frac >= min_fraction:
+                rects.append({"box": [x0, y0, x1, y1],
+                               "area": area, "fraction": round(frac, 3)})
 
-        frac_present = float(np.mean([p[idx] > half for p in per_frame_profiles]))
-        if frac_present < RIDGE_MIN_FRAME_CONSISTENCY:
-            continue
-
-        # Hough/Radon-style full-span coverage: a real seam is a strong
-        # edge across essentially its whole length, not just a localized
-        # feature that happens to average to a high peak. `line` is the raw
-        # per-pixel gradient ALONG the candidate row/column itself (not
-        # reduced across frames-only like `profile` is).
-        line = mean_grad[idx, :] if axis == 0 else mean_grad[:, idx]
-        line_peak = float(line.max())
-        coverage = float(np.mean(line > line_peak * SPATIAL_COVERAGE_HALF_FRAC)) if line_peak > 0 else 0.0
-        if coverage < SPATIAL_COVERAGE_MIN_FRAC:
-            continue
-
-        candidates.append(idx)
-
-    if not candidates:
-        return []
-
-    # Collapse near-duplicate detections of the SAME physical edge first --
-    # a real sharp edge with a little internal texture can register as two
-    # local maxima a few pixels apart rather than one clean peak (confirmed
-    # on real footage: a genuine seam showed up as two maxima 3px apart, at
-    # the FWHM boundary). Only after deduplicating do we check for
-    # genuinely distinct nearby candidates -- a different situation (two
-    # edges of one small graphic feature, confirmed on real footage 8px
-    # apart) that gets rejected as an ambiguous cluster rather than one
-    # picked from arbitrarily.
-    dedup_bands = _merge_bands([(c - RIDGE_SEAM_MERGE_PX, c + RIDGE_SEAM_MERGE_PX)
-                                for c in candidates])
-    dedup = [(s + e) // 2 for s, e in dedup_bands]
-
-    # Two candidates within RIDGE_MIN_SEAM_SEPARATION_PX of each other can't
-    # both be real view-splitting seams -- the content segment between them
-    # wouldn't come anywhere close to passing MIN_VIEW_FRACTION, so this is
-    # almost certainly two edges of one small graphic feature (an icon, a
-    # divider box) rather than two independent seams with a legitimate
-    # sliver of a view squeezed between them. Drop the whole cluster rather
-    # than guess which one, if either, is real.
-    isolated = []
-    for i, c in enumerate(dedup):
-        too_close_left  = i > 0 and c - dedup[i - 1] < RIDGE_MIN_SEAM_SEPARATION_PX
-        too_close_right = (i < len(dedup) - 1
-                           and dedup[i + 1] - c < RIDGE_MIN_SEAM_SEPARATION_PX)
-        if not too_close_left and not too_close_right:
-            isolated.append(c)
-
-    return isolated
+    rects.sort(key=lambda r: -r["area"])
+    return rects
 
 
 def _seam_is_independent(frames_gray: list[np.ndarray], axis: int, idx: int) -> bool:
@@ -603,113 +489,225 @@ def _seam_content_dissimilarity(mean_gray: np.ndarray, axis: int, idx: int,
     return 1.0 - float(np.corrcoef(A, B)[0, 1])
 
 
-def _refine_hcut_to_vertical_extent(mean_gray: np.ndarray, idx: int,
-                                    search: int = HCUT_REFINE_SEARCH) -> int:
+# --- FILTER: reject seam-line candidates that aren't real compositing cuts ---
+# _activity_seam_segments finds every persistent axis-aligned edge, including
+# false positives it can't itself tell apart from a real seam: a strong
+# static edge inside one continuous view (a guardrail, a scoring-structure
+# edge, a field line) or a CG graphic's internal divider. _seam_is_independent
+# and _seam_content_dissimilarity already discriminate a real compositing cut
+# from a strong-but-internal edge -- they were built for the old full-span
+# ridge detector -- and are reused here unchanged, but evaluated only across
+# each line's own covered interval(s), stitched together, rather than the
+# whole frame: a match8-style partial seam has no meaningful signal outside
+# where it's actually present.
+SEAM_MIN_STITCHED_LEN = 20  # px of covered interval needed to trust the stats
+
+
+def _stitch_along_intervals(arr: np.ndarray, axis: int,
+                            intervals: list[tuple[int, int]]) -> np.ndarray:
+    """Concatenate the covered slices of `arr` along the seam direction,
+    dropping uncovered gaps (a CG graphic mid-line, an NMS hole) so the
+    content checks only see genuine seam-adjacent pixels."""
+    if axis == 0:
+        parts = [arr[:, s:e] for s, e in intervals if e > s]
+        return np.concatenate(parts, axis=1) if parts else arr[:, :0]
+    parts = [arr[s:e, :] for s, e in intervals if e > s]
+    return np.concatenate(parts, axis=0) if parts else arr[:0, :]
+
+
+def _filter_seam_lines(lines: list[dict], frames_gray: list[np.ndarray],
+                       mean_gray: np.ndarray, axis: int) -> list[dict]:
+    """Keep only lines that pass the real-seam content checks, evaluated over
+    each line's own covered span rather than assuming a full-frame span."""
+    kept = []
+    for line in lines:
+        if line["coverage"] < SEAM_MIN_STITCHED_LEN:
+            continue
+        idx = line["pos"]
+        mean_strip = _stitch_along_intervals(mean_gray, axis, line["intervals"])
+        if _seam_content_dissimilarity(mean_strip, axis, idx) < CONTENT_DISSIM_MIN:
+            continue
+        frame_strips = [_stitch_along_intervals(g, axis, line["intervals"])
+                        for g in frames_gray]
+        if not _seam_is_independent(frame_strips, axis, idx):
+            continue
+        kept.append(line)
+    return kept
+
+
+# --- CONNECT: assemble surviving lines into camera-view rectangles ---
+# A surviving line may only wall off PART of the frame width/height (match8's
+# vertically-offset center panel), so a guillotine cut -- which must span the
+# full strip -- can't place it. Instead: lay a grid over the frame at every
+# surviving line's position on both axes, then merge adjacent grid cells back
+# together wherever no surviving line actually covers their shared boundary --
+# a wall only separates the cells it's actually documented to run between.
+WALL_POS_MERGE_PX  = 6    # candidate positions this close are one wall, not two
+WALL_MIN_COVER_FRAC = 0.6  # fraction of a cell boundary a wall must cover to separate the cells
+
+
+def _grid_positions(line_positions: list[int], length: int,
+                    tol: int = WALL_POS_MERGE_PX) -> list[int]:
+    """Sorted, deduped interior grid lines for one axis, plus the frame's own
+    two edges. Interior positions within `tol` of an edge are dropped rather
+    than merged into it, so the true 0/length endpoints are never lost to a
+    nearby line snapping onto them."""
+    interior = sorted(p for p in line_positions if tol < p < length - tol)
+    merged = []
+    for p in interior:
+        if not merged or p - merged[-1] > tol:
+            merged.append(p)
+    return [0] + merged + [length]
+
+
+def _wall_covers(line_group: list[dict], span: tuple[int, int],
+                 min_frac: float = WALL_MIN_COVER_FRAC) -> bool:
+    """True if the combined covered interval(s) of every line in
+    `line_group` span at least `min_frac` of a grid cell boundary."""
+    s0, s1 = span
+    span_len = s1 - s0
+    if span_len <= 0:
+        return False
+    all_intervals = [iv for line in line_group for iv in line["intervals"]]
+    if not all_intervals:
+        return False
+    covered = sum(max(0, min(e, s1) - max(s, s0)) for s, e in _merge_bands(all_intervals))
+    return covered / span_len >= min_frac
+
+
+def _connect_regions(h_lines: list[dict], v_lines: list[dict],
+                     img_w: int, img_h: int) -> list[tuple[int, int, int, int]]:
     """
-    Move a horizontal borderless cut from the field-border edge a row-axis ridge
-    latches onto, down to where the bottom strip's vertical seams actually begin.
-
-    A composited bottom row makes each of its rows carry several strong vertical
-    edges (the seams between its feeds); the single continuous view above carries
-    far fewer. So the cut is the row where that per-row vertical-edge structure
-    turns on. Returns idx unchanged when there's no such structure nearby (the
-    region below is a single continuous view, not a composited row).
+    Grid + union-find: cut the frame into a grid at every surviving line's
+    position on both axes, then union adjacent cells whenever no surviving
+    line actually walls off their shared boundary. Returns bounding boxes of
+    the resulting cell groups -- the camera-view rectangles.
     """
-    h, w = mean_gray.shape
-    sx = np.abs(cv2.Sobel(cv2.GaussianBlur(mean_gray, (3, 3), 0),
-                          cv2.CV_32F, 1, 0, ksize=3))
-    k = min(6, w)
-    topk = np.partition(sx, w - k, axis=1)[:, w - k:].mean(axis=1)
-    topk = cv2.GaussianBlur(topk.reshape(-1, 1), (1, 5), 0).ravel()
-    lo = max(1, idx - search)
-    hi = min(h - 1, idx + search + 8)          # slight downward bias: the cut is below the border
-    if hi - lo < 3:
-        return idx
-    y = lo + int(np.argmax(np.gradient(topk)[lo:hi]))   # strongest onset of vertical structure
-    above = topk[max(0, y - 20):y].mean()
-    below = topk[y:y + 20].mean()
-    return y if below > above * HCUT_REFINE_MIN_STEP else idx
+    ys = _grid_positions([l["pos"] for l in h_lines], img_h)
+    xs = _grid_positions([l["pos"] for l in v_lines], img_w)
+    nrows, ncols = len(ys) - 1, len(xs) - 1
+
+    parent = list(range(nrows * ncols))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i, j):
+        ri, rj = find(i), find(j)
+        if ri != rj:
+            parent[ri] = rj
+
+    def cell(r, c):
+        return r * ncols + c
+
+    def lines_at(lines, pos):
+        return [l for l in lines if abs(l["pos"] - pos) <= WALL_POS_MERGE_PX]
+
+    for r in range(nrows):
+        for c in range(ncols - 1):
+            group = lines_at(v_lines, xs[c + 1])
+            if not _wall_covers(group, (ys[r], ys[r + 1])):
+                union(cell(r, c), cell(r, c + 1))
+    for c in range(ncols):
+        for r in range(nrows - 1):
+            group = lines_at(h_lines, ys[r + 1])
+            if not _wall_covers(group, (xs[c], xs[c + 1])):
+                union(cell(r, c), cell(r + 1, c))
+
+    groups: dict[int, list[tuple[int, int]]] = {}
+    for r in range(nrows):
+        for c in range(ncols):
+            groups.setdefault(find(cell(r, c)), []).append((r, c))
+
+    boxes = []
+    for cells in groups.values():
+        r0 = min(r for r, c in cells); r1 = max(r for r, c in cells) + 1
+        c0 = min(c for r, c in cells); c1 = max(c for r, c in cells) + 1
+        boxes.append((xs[c0], ys[r0], xs[c1], ys[r1]))
+    return boxes
 
 
-def _find_separators(profile: np.ndarray, frames_gray: list[np.ndarray] | None,
-                     axis: int) -> list[tuple[int, int]]:
-    """
-    Find separator bands along one axis of one content strip.
-
-    Static-CG borders show up as troughs (_local_minima_bands) and are found
-    first. Borderless cuts (feeds composited edge-to-edge, no graphic between)
-    are found as persistent gradient ridges, then put through two filters so
-    field geometry can't masquerade as a seam -- both are needed because a ridge
-    alone cannot tell a compositing cut from a strong line inside one view:
-      - _seam_is_independent: the two sides change independently frame to frame.
-      - _seam_content_dissimilarity: the two sides are unrelated static footage.
-        This is the one that rejects the false midline split on a single wide
-        field shot -- edge strength and temporal independence both pass there
-        (two halves of one field move independently), the shared static
-        background is the only tell.
-    A confirmed horizontal cut is then snapped off the field-border edge it
-    latched onto, down to where the bottom strip's feeds begin
-    (_refine_hcut_to_vertical_extent). Both signals run on every axis regardless
-    of what the trough pass found, so a hard cut still gets detected on an axis
-    that also carries a static CG band elsewhere.
-    """
-    bands = list(_local_minima_bands(profile))
-    if frames_gray:
-        mean_gray = _mean_image(frames_gray)
-        for idx in _gradient_ridge_seams(frames_gray, axis):
-            if not _seam_is_independent(frames_gray, axis, idx):
-                continue
-            if _seam_content_dissimilarity(mean_gray, axis, idx) < CONTENT_DISSIM_MIN:
-                continue
-            if axis == 0:
-                idx = _refine_hcut_to_vertical_extent(mean_gray, idx)
-            bands.append((idx, idx))
-    return _merge_bands(bands)
-
-
-def find_camera_rects(range_img: np.ndarray,
-                      min_fraction: float = MIN_VIEW_FRACTION,
-                      frames_gray: list[np.ndarray] | None = None) -> list[dict]:
-    """
-    Hierarchical variance-based camera view detection.
-
-    1. Compute row-wise variance of the range image -> find horizontal
-       separator band(s) splitting the frame into row strips (see
-       _find_separators for the CG-border / borderless-seam cascade).
-    2. For each row strip, independently compute column-wise variance ->
-       find vertical separator band(s) the same way.
-    3. Return bounding rects for all resulting camera-view regions.
-
-    `frames_gray`, if given, enables the borderless-seam fallback for
-    districts that don't draw a static graphic between camera feeds; without
-    it, only the static-CG-trough method runs (e.g. when reusing a
-    precomputed --range-image with no frame data behind it).
-    """
-    h, w = range_img.shape
-    total = h * w
-
-    row_var    = np.var(range_img, axis=1)
-    h_bands    = _find_separators(row_var, frames_gray, axis=0)
-    row_strips = _segments_from_bands(h_bands, h)
-
-    rects = []
-    for y0, y1 in row_strips:
-        strip        = range_img[y0:y1, :]
-        strip_frames = [g[y0:y1, :] for g in frames_gray] if frames_gray else None
-
-        col_var  = np.var(strip, axis=0)
-        v_bands  = _find_separators(col_var, strip_frames, axis=1)
-        col_segs = _segments_from_bands(v_bands, w)
-
-        for x0, x1 in col_segs:
-            area = (x1 - x0) * (y1 - y0)
-            frac = area / total
-            if frac >= min_fraction:
-                rects.append({"box": [x0, y0, x1, y1],
-                               "area": area, "fraction": round(frac, 3)})
-
-    rects.sort(key=lambda r: -r["area"])
-    return rects
+# NOT WIRED IN, and parked for now -- see "Status" below before picking this
+# back up. find_camera_rects (above, near the top of the file) is the active
+# detector and uses only _local_minima_bands, which requires a static CG
+# border between camera feeds. That's the official FIRST guideline and
+# essentially every district/event follows it -- Texas is the one exception
+# seen so far, which is the whole reason this experimental path exists. This
+# is therefore a minority-of-events problem, not a general fix; time-box any
+# further work on it accordingly.
+#
+# Pipeline: DETECT (_activity_seam_segments) / CLUSTER (_cluster_seam_segments)
+# / FILTER (_filter_seam_lines) / CONNECT (_connect_regions). DETECT+CLUSTER
+# reliably recover every real seam, including match8-style seams that don't
+# span the full frame (a CG panel vertically offset from the two camera feeds
+# flanking it -- see ground-truth pixel coords for match7/match8 in git log /
+# conversation history if picking this back up). FILTER and CONNECT do not
+# yet reliably turn that into correct rectangles. Concretely tried and ruled
+# out:
+#
+#   1. _filter_seam_lines as currently written (content-dissimilarity +
+#      temporal-independence, evaluated over each line's own stitched
+#      covered interval) keeps far too many false positives once you look at
+#      the FULL candidate set rather than a few hand-picked examples: on
+#      match7/match8, every ground-truth-real line does survive, but so do
+#      roughly half of everything else (e.g. match8 h-axis: 23 candidates,
+#      14 survive FILTER, only 3 are real). Neither signal separates real
+#      from false on its own -- false lines routinely score HIGHER on
+#      content-dissimilarity than real ones (match8: false pos=280 scores
+#      1.211 vs real pos=713's 1.062), and temporal-independence reads True
+#      for most lines regardless of truth (15/23 on match8 h-axis). Raw
+#      `coverage` doesn't separate them either -- a false line can have more
+#      covered length than a real one (match8 v-axis: false pos=1032 at 404px
+#      vs real pos=1266 at 325px). The specific failure mode confirmed on
+#      match8: a physical arena guardrail crossing most of the frame width
+#      (a static, near-motionless object, same class of false positive as
+#      the guardrail/rope found in match1/match4 -- see conversation history)
+#      registers as pos=657, coverage=850, dissim=0.825 (high!) -- only
+#      _seam_is_independent (indep=False) correctly rejects it, and that's
+#      not something you can rely on in general per the point above.
+#
+#   2. Region-level content comparison as a replacement for per-line
+#      filtering (build the grid from ALL candidate lines, unfiltered, then
+#      decide cell-to-cell merges via _seam_is_independent/
+#      _seam_content_dissimilarity-style checks applied to the two whole
+#      neighboring grid cells instead of a thin strip around one line) --
+#      the idea being that a real seam's two sides should be robustly
+#      distinguishable using their full area, not just a narrow margin.
+#      Tested directly on hand-picked large boxes (e.g. match7's main view
+#      vs. bot_left cam) and the checks work great in isolation (dissim=0.94,
+#      clearly different). But wired into the full grid+union-find CONNECT,
+#      the result collapsed to just 1-2 regions instead of 3-4: with dozens
+#      of candidate lines the grid fragments into many cells, several
+#      inevitably thin (<10-15px) on one side, too thin to compare reliably;
+#      auto-merging those (the only sane default) plus even one or two
+#      marginal same-content calls elsewhere is enough for union-find
+#      transitivity to silently bridge two genuinely different regions
+#      together through a chain of "uncertain, so merge" steps -- one bad
+#      link anywhere in the chain glues everything past it into one blob.
+#      This is a real structural problem with cell-by-cell grid merging, not
+#      a threshold-tuning issue.
+#
+#   3. Hierarchical linear strip-merge (same region-comparison idea, but
+#      row-strips using the FULL frame width, then column-strips using the
+#      full height of each surviving row-strip -- i.e. avoid 2D grid cells
+#      and their thin-sliver/transitivity problem entirely by only ever
+#      comparing large, full-span strips, closer in spirit to the original
+#      guillotine). This avoids the thin-cell problem by construction, but
+#      initial testing on match7 showed it *still* failed to merge adjacent
+#      strips that are obviously part of the same real camera view (e.g.
+#      row(0,129) vs row(129,184), both well within the top scoreboard/main
+#      view before the real y=254 cut) -- investigation of why was cut short
+#      here. Worth checking first if this gets picked back up: whether
+#      SEAM_CORR_MAX/CONTENT_DISSIM_MIN (tuned for thin strips beside a line)
+#      are simply too permissive at this coarser, full-strip scale, before
+#      concluding the approach itself doesn't work.
+#
+# Until FILTER/CONNECT are fixed, call the individual DETECT/CLUSTER
+# functions directly if needed (see visualize_seam_lines / --viz-seams for a
+# debug view of what they currently detect).
 
 
 # ---------------------------------------------------------------------------
@@ -768,6 +766,125 @@ def exclude_cg_regions(rects: list[dict],
         else:
             kept.append(r)
     return kept, excluded
+
+
+# ---------------------------------------------------------------------------
+# Seam-segment DETECT + CLUSTER -- used by find_camera_rects above
+# ---------------------------------------------------------------------------
+#
+# The old approach was a two-level guillotine: a full-width horizontal dip ->
+# row strips, then a full-height dip within each strip, plus a separate
+# full-span ridge search for borderless cuts. It assumed every seam runs
+# edge-to-edge of the frame (true for most broadcasts) and so could not
+# represent a layout whose seams don't span the frame -- e.g. a bottom row of
+# feeds with a center CG panel offset vertically from its neighbours
+# (match8): there is no single horizontal line across the full width, so the
+# row pass found nothing there and the frame under-segmented.
+#
+# The functions below treat the temporal range image as an "activity graph"
+# and find seams as axis-aligned edge SEGMENTS in it, so a seam is allowed to
+# stop partway across the frame (it just ends where it meets a perpendicular
+# seam). One detector recovers both a static-CG-band border and a borderless
+# compositing cut -- both produce a persistent edge in the activity image --
+# where the old code needed two separate mechanisms. Validated on match8:
+# recovers every real cut (including the interrupted main/bottom border the
+# old guillotine missed), plus noise that _filter_seam_lines rejects.
+
+def _contiguous_runs(indices: np.ndarray, gap: int) -> list[tuple[int, int]]:
+    """Group sorted indices into (start, end) runs, bridging holes <= `gap` --
+    a ball crossing a seam blanks a few pixels of it and shouldn't split it."""
+    if len(indices) == 0:
+        return []
+    runs = []
+    start = prev = int(indices[0])
+    for i in indices[1:]:
+        i = int(i)
+        if i - prev <= gap:
+            prev = i
+        else:
+            runs.append((start, prev)); start = prev = i
+    runs.append((start, prev))
+    return runs
+
+
+def _activity_seam_segments(range_img: np.ndarray, axis: int,
+                            smooth: int = 121, min_len: int = 140,
+                            thr_pct: float = 97.0, nms: int = 11,
+                            gap: int = 40) -> list[tuple[int, int, int, int]]:
+    """
+    Detect axis-aligned seam SEGMENTS in the activity (temporal-range) image.
+    `axis=0` finds horizontal seams, `axis=1` vertical. Returns (x0,y0,x1,y1).
+
+    The trick that makes this work on real footage is directional smoothing:
+    average the activity ALONG the seam direction first. A composite seam is
+    constant along its length, so it survives the averaging; ball/robot texture
+    is random and cancels. Only then take the perpendicular gradient, so the
+    strong responses are the seams rather than the thousands of moving balls.
+    Then non-max-suppress across the perpendicular axis to thin each seam to one
+    line, and keep contiguous runs longer than `min_len` (partial seams are
+    fine -- that is the whole point vs. the full-span guillotine).
+
+    Validated on match8: recovers every real cut, but also picks up scorebug
+    text, arena rails, etc. -- filtering those out is _filter_seam_lines's job.
+    """
+    A = range_img
+    if axis == 0:
+        blurred = cv2.blur(A, (smooth, 1))                       # cancel texture along x
+        edge = cv2.blur(np.abs(cv2.Sobel(blurred, cv2.CV_32F, 0, 1, ksize=3)), (smooth, 1))
+        keep = (edge > np.percentile(edge, thr_pct)) & \
+               (edge >= cv2.dilate(edge, np.ones((nms, 1), np.uint8)) - 1e-3)
+        segs = []
+        for y in range(A.shape[0]):
+            for s, e in _contiguous_runs(np.where(keep[y])[0], gap):
+                if e - s >= min_len:
+                    segs.append((s, y, e, y))
+        return segs
+    blurred = cv2.blur(A, (1, smooth))                           # cancel texture along y
+    edge = cv2.blur(np.abs(cv2.Sobel(blurred, cv2.CV_32F, 1, 0, ksize=3)), (1, smooth))
+    keep = (edge > np.percentile(edge, thr_pct)) & \
+           (edge >= cv2.dilate(edge, np.ones((1, nms), np.uint8)) - 1e-3)
+    segs = []
+    for x in range(A.shape[1]):
+        for s, e in _contiguous_runs(np.where(keep[:, x])[0], gap):
+            if e - s >= min_len:
+                segs.append((x, s, x, e))
+    return segs
+
+
+def _cluster_seam_segments(segments: list[tuple[int, int, int, int]], axis: int,
+                           tol: int = 12, merge_gap: int = 30) -> list[dict]:
+    """
+    Group segments sharing a row (axis=0) or column (axis=1) into cut LINES.
+    Each line carries its position, the merged coverage intervals along the
+    seam, and the total covered length. A real cut is a long, well-covered line;
+    scene texture is many short scattered ones -- but a full-width scorebug
+    also produces long, well-covered INTERNAL lines, so coverage alone isn't
+    enough to filter; that's what _filter_seam_lines's content checks are for.
+    """
+    pos_i = 1 if axis == 0 else 0
+    a_i, b_i = (0, 2) if axis == 0 else (1, 3)
+    lines: list[dict] = []
+    for seg in sorted(segments, key=lambda s: s[pos_i]):
+        for L in lines:
+            if abs(L["pos"] - seg[pos_i]) <= tol:
+                L["intervals"].append((seg[a_i], seg[b_i]))
+                L["pos"] = (L["pos"] * L["n"] + seg[pos_i]) / (L["n"] + 1)
+                L["n"] += 1
+                break
+        else:
+            lines.append({"pos": float(seg[pos_i]),
+                          "intervals": [(seg[a_i], seg[b_i])], "n": 1})
+    for L in lines:
+        L["pos"] = int(round(L["pos"]))
+        merged: list[list[int]] = []
+        for s, e in sorted(L["intervals"]):
+            if merged and s <= merged[-1][1] + merge_gap:
+                merged[-1][1] = max(merged[-1][1], e)
+            else:
+                merged.append([s, e])
+        L["intervals"] = [(s, e) for s, e in merged]
+        L["coverage"] = sum(e - s for s, e in L["intervals"])
+    return lines
 
 
 # ---------------------------------------------------------------------------
@@ -857,6 +974,111 @@ def visualize(img_bgr: np.ndarray, range_img: np.ndarray,
     return np.hstack([left_s, range_s])
 
 
+def visualize_seam_lines(img_bgr: np.ndarray,
+                         h_lines: list[dict], v_lines: list[dict],
+                         h_kept: list[dict], v_kept: list[dict]) -> np.ndarray:
+    """
+    Debug view of the DETECT+CLUSTER+FILTER stages: every clustered seam line
+    drawn over its own covered interval(s) -- not a full-width/height line --
+    so a partial seam's true extent is visible. Green = survived
+    _filter_seam_lines; red = rejected. Thickness scales with `coverage` so
+    long, confident candidates are easy to pick out from short, noisy ones.
+    """
+    vis = img_bgr.copy()
+    kept_h_ids = {id(l) for l in h_kept}
+    kept_v_ids = {id(l) for l in v_kept}
+    for lines, kept_ids, axis in [(h_lines, kept_h_ids, 0), (v_lines, kept_v_ids, 1)]:
+        for line in lines:
+            passed = id(line) in kept_ids
+            color = (0, 220, 0) if passed else (0, 0, 230)
+            thickness = 1 + min(6, line["coverage"] // 200)
+            pos = line["pos"]
+            for s, e in line["intervals"]:
+                pt1, pt2 = ((s, pos), (e, pos)) if axis == 0 else ((pos, s), (pos, e))
+                cv2.line(vis, pt1, pt2, color, thickness)
+            label_at = (line["intervals"][0][0] + 4, pos - 4) if axis == 0 \
+                       else (pos + 4, line["intervals"][0][0] + 12)
+            cv2.putText(vis, f"{pos}|{line['coverage']}", label_at,
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA)
+    return vis
+
+
+def _plot_profile_vertical(profile: np.ndarray, plot_h: int, width: int,
+                           bands: list[tuple[int, int]], label: str) -> np.ndarray:
+    """
+    Render a 1D per-row profile (e.g. row_var) as a vertical line plot --
+    row index on the vertical axis, activity value on the horizontal axis --
+    resampled to `plot_h` so it lines up row-for-row with the frame/activity
+    panels once those are scaled to the same height. Detected bands are
+    shaded behind the trace so a trough's position is visible relative to
+    what _local_minima_bands actually grew it into.
+    """
+    idx = (np.linspace(0, len(profile) - 1, plot_h)).astype(np.int32)
+    resampled = profile[idx]
+    plot = np.full((plot_h, width, 3), 255, dtype=np.uint8)
+    for s, e in bands:
+        s2, e2 = int(s / len(profile) * plot_h), int(e / len(profile) * plot_h)
+        cv2.rectangle(plot, (0, s2), (width - 1, min(e2, plot_h - 1)), (225, 225, 255), -1)
+    pmax = float(resampled.max()) or 1.0
+    xs = np.clip((resampled / pmax * (width - 12)).astype(np.int32), 0, width - 1)
+    pts = np.column_stack([xs, np.arange(plot_h)]).astype(np.int32)
+    cv2.polylines(plot, [pts], isClosed=False, color=(180, 0, 0), thickness=1, lineType=cv2.LINE_AA)
+    cv2.putText(plot, label, (6, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1, cv2.LINE_AA)
+    return plot
+
+
+def visualize_bands(img_bgr: np.ndarray, range_img: np.ndarray) -> np.ndarray:
+    """
+    Debug view of the static-CG-band detection (_local_minima_bands) that
+    find_camera_rects actually uses: the live frame, the activity (temporal-
+    range) image, and a plot of the global row-activity profile (row_var),
+    all side by side. Unlike seam lines, a band is a guillotine cut -- it
+    always spans the FULL width (h_bands, red) or the full height of the row
+    strip it was found within (v_bands, magenta), never a partial interval,
+    so each is drawn as a translucent strip rather than a line. The plot
+    panel shows the exact per-row signal _local_minima_bands scans for
+    troughs in, with the same bands shaded behind the trace.
+    """
+    h, w = range_img.shape
+
+    scaled = np.clip(range_img / max(range_img.max(), 1) * 255, 0, 255).astype(np.uint8)
+    frame_vis = img_bgr.copy()
+    range_vis = cv2.cvtColor(scaled, cv2.COLOR_GRAY2BGR)
+
+    def draw_band(y0: int, y1: int, x0: int, x1: int, color: tuple):
+        for vis in (frame_vis, range_vis):
+            overlay = vis.copy()
+            cv2.rectangle(overlay, (x0, y0), (x1 - 1, y1 - 1), color, -1)
+            vis[:] = cv2.addWeighted(overlay, 0.35, vis, 0.65, 0)
+
+    row_var = np.var(range_img, axis=1)
+    h_bands = _local_minima_bands(row_var)
+    for s, e in h_bands:
+        draw_band(s, e + 1, 0, w, (0, 0, 255))            # red: row-axis bands
+
+    row_strips = _segments_from_bands(h_bands, h)
+    total_v_bands = 0
+    for y0, y1 in row_strips:
+        strip   = range_img[y0:y1, :]
+        col_var = np.var(strip, axis=0)
+        v_bands = _local_minima_bands(col_var)
+        total_v_bands += len(v_bands)
+        for s, e in v_bands:
+            draw_band(y0, y1, s, e + 1, (255, 0, 255))    # magenta: col-axis bands within this strip
+
+    for vis in (frame_vis, range_vis):
+        cv2.putText(vis, f"h_bands={len(h_bands)} v_bands={total_v_bands}",
+                    (8, h - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+
+    scale  = 0.5
+    plot_w = 260
+    frame_s = cv2.resize(frame_vis, (int(w * scale), int(h * scale)))
+    range_s = cv2.resize(range_vis, (int(w * scale), int(h * scale)))
+    plot_s  = _plot_profile_vertical(row_var, int(h * scale), plot_w, h_bands,
+                                     "row activity (row_var)")
+    return np.hstack([frame_s, range_s, plot_s])
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -888,6 +1110,15 @@ def main():
                     help="save the accumulated range image for inspection")
     ap.add_argument("--viz", action="store_true",
                     help="save side-by-side debug image")
+    ap.add_argument("--viz-seams", action="store_true",
+                    help="save a debug image of every DETECT+CLUSTER seam line "
+                         "over its covered interval(s), green=passed FILTER / "
+                         "red=rejected, instead of running full view detection")
+    ap.add_argument("--viz-bands", action="store_true",
+                    help="save a debug image of the static-CG-band detection "
+                         "(_local_minima_bands) find_camera_rects actually uses, "
+                         "on both the frame and the activity image, instead of "
+                         "running full view detection")
     ap.add_argument("--viz-out", metavar="PATH")
     args = ap.parse_args()
 
@@ -964,6 +1195,30 @@ def main():
             rp = DATA_DIR / "images" / f"{event_match}_range.png"
             save_range_image(range_img, rp)
             print(f"[range] saved -> {rp}", file=sys.stderr)
+
+        if args.viz_seams:
+            h_lines = _cluster_seam_segments(_activity_seam_segments(range_img, axis=0), axis=0)
+            v_lines = _cluster_seam_segments(_activity_seam_segments(range_img, axis=1), axis=1)
+            if frames_for_split:
+                mean_gray = _mean_image(frames_for_split)
+                h_kept = _filter_seam_lines(h_lines, frames_for_split, mean_gray, axis=0)
+                v_kept = _filter_seam_lines(v_lines, frames_for_split, mean_gray, axis=1)
+            else:
+                h_kept, v_kept = h_lines, v_lines
+            print(f"[seams] h_lines={len(h_lines)} (kept {len(h_kept)})  "
+                  f"v_lines={len(v_lines)} (kept {len(v_kept)})", file=sys.stderr)
+            vis = visualize_seam_lines(ref_img, h_lines, v_lines, h_kept, v_kept)
+            out = args.viz_out or str(ref_path.with_suffix("")) + "_seams.jpg"
+            cv2.imwrite(out, vis)
+            print(f"[viz-seams] {out}", file=sys.stderr)
+            return
+
+        if args.viz_bands:
+            vis = visualize_bands(ref_img, range_img)
+            out = args.viz_out or str(ref_path.with_suffix("")) + "_bands.jpg"
+            cv2.imwrite(out, vis)
+            print(f"[viz-bands] {out}", file=sys.stderr)
+            return
 
         rects = find_camera_rects(range_img, args.min_fraction, frames_for_split)
         rects, excluded_cg = exclude_cg_regions(rects, frames_bgr)

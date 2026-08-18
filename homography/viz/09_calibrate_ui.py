@@ -6,16 +6,17 @@ wireframe locks onto the real broadcast frame.
 
 Why this exists
 -----------------
-pipeline/02_search_focal.py now fits intrinsics automatically and well,
-but only once a view has enough AprilTag correspondence points to
-constrain the fit (see docs/pose_calibration_research.md) -- a view with
-just 2-4 tags is fundamentally underdetermined for that, no search
-algorithm fixes too little data. This tool is the fallback for exactly
-that case: closes the loop by eye instead, the same approach this
-project's original (now-retired) manual-fit tool used, rebuilt as real
-browser sliders instead of OpenCV trackbars (which can't show a converted
-physical value, only a raw tick position -- not a problem here since this
-is plain HTML/JS controlling what's drawn).
+pipeline/03_solve_pose.py's intrinsics search now fits intrinsics
+automatically and well, but only once a view has enough AprilTag
+correspondence points to constrain the fit (see
+docs/pose_calibration_research.md) -- a view with just 2-4 tags is
+fundamentally underdetermined for that, no search algorithm fixes too
+little data. This tool is the fallback for exactly that case: closes the
+loop by eye instead, the same approach this project's original
+(now-retired) manual-fit tool used, rebuilt as real browser sliders
+instead of OpenCV trackbars (which can't show a converted physical value,
+only a raw tick position -- not a problem here since this is plain
+HTML/JS controlling what's drawn).
 
 What it draws, per view, on one grabbed video frame:
   - the field boundary + center line
