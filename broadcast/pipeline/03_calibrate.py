@@ -270,21 +270,28 @@ def read_digits_str(frame: np.ndarray, box: list[int], allow_colon: bool = False
 # Glyph segmentation
 # ---------------------------------------------------------------------------
 
+def field_mask(crop_bgr: np.ndarray, polarity: str) -> np.ndarray:
+    """Ink mask for a field crop. `polarity` is 'light' (white digits on a
+    colored chip -- score/badges) or 'dark' (black digits on a white chip --
+    clock). Factored out of segment_glyphs so segment_separators and
+    05_extract.py's search share ONE definition of "ink" -- they all depend
+    on the same SAT_MAX_WHITE/VAL_MIN_WHITE/VAL_MAX_DARK investigation, and
+    a second copy would silently drift from it."""
+    hsv = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2HSV)
+    sat, val = hsv[:, :, 1], hsv[:, :, 2]
+    if polarity == "light":
+        return ((sat <= SAT_MAX_WHITE) & (val >= VAL_MIN_WHITE)).astype(np.uint8)
+    return (val <= VAL_MAX_DARK).astype(np.uint8)
+
+
 def segment_glyphs(frame_bgr: np.ndarray, box: list[int], polarity: str) -> list[list[int]]:
     """Individual glyph boxes (absolute frame coords, left-to-right,
-    separators dropped) inside `box`. `polarity` is 'light' (white digits
-    on a colored chip -- score/badges) or 'dark' (black digits on a white
-    chip -- clock)."""
+    separators dropped) inside `box`."""
     x0, y0, x1, y1 = box
     crop = frame_bgr[y0:y1, x0:x1]
     if crop.size == 0:
         return []
-    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
-    sat, val = hsv[:, :, 1], hsv[:, :, 2]
-    if polarity == "light":
-        mask = ((sat <= SAT_MAX_WHITE) & (val >= VAL_MIN_WHITE)).astype(np.uint8)
-    else:
-        mask = (val <= VAL_MAX_DARK).astype(np.uint8)
+    mask = field_mask(crop, polarity)
 
     box_h = y1 - y0
     n_labels, _, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
@@ -303,6 +310,67 @@ def segment_glyphs(frame_bgr: np.ndarray, box: list[int], polarity: str) -> list
         digits.append([x0 + int(bx), y0 + int(by), x0 + int(bx) + int(bw), y0 + int(by) + int(bh)])
     digits.sort(key=lambda c: c[0])
     return digits
+
+
+def segment_separators(frame_bgr: np.ndarray, box: list[int], polarity: str) -> list[list[int]]:
+    """The non-digit glyph inside `box` -- in practice the clock's ':' -- as
+    ONE box, or [] if there isn't one.
+
+    Two decisions worth recording:
+
+    * The returned box spans the DIGITS' row band, not the separator's own
+      tight bounds. A ':' cropped tightly to its two dots carries no fixed
+      relationship to the digit baseline, so a template built from it could
+      not be placed by the same vertical anchor a digit is placed by --
+      05_extract.py pins every template to the field's ink top row. Padding
+      the crop out to full digit height (background above and below the
+      dots) makes the separator just another glyph as far as matching is
+      concerned, which is the whole point of harvesting it.
+    * No OCR is involved or needed. A separator is identified structurally:
+      too short to be a digit, and horizontally BETWEEN two components that
+      are tall enough to be digits. That's why --separators mode can run
+      without importing easyocr at all.
+
+    Components are grouped by column overlap (the two dots share columns, so
+    they merge into one glyph) and the highest-area group wins, which is what
+    keeps a stray speck elsewhere in the chip from being harvested instead.
+    """
+    x0, y0, x1, y1 = box
+    crop = frame_bgr[y0:y1, x0:x1]
+    if crop.size == 0:
+        return []
+    mask = field_mask(crop, polarity)
+    box_h = y1 - y0
+    n_labels, _, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+
+    tall, short = [], []
+    for lbl in range(1, n_labels):
+        bx, by, bw, bh, barea = stats[lbl]
+        if barea < MIN_GLYPH_AREA_PX:
+            continue
+        (tall if bh >= box_h * MIN_GLYPH_HEIGHT_FRAC else short).append(
+            (int(bx), int(by), int(bw), int(bh), int(barea)))
+    if not tall or not short:
+        return []
+
+    digits_left = min(c[0] for c in tall)
+    digits_right = max(c[0] + c[2] for c in tall)
+    row_top = min(c[1] for c in tall)
+    row_bot = max(c[1] + c[3] for c in tall)
+
+    groups = []
+    for c in sorted(short, key=lambda c: c[0]):
+        if not (digits_left < c[0] and c[0] + c[2] < digits_right):
+            continue  # not between digits -- chip edge speck, not a separator
+        if groups and c[0] <= groups[-1][1]:
+            g = groups[-1]
+            g[0], g[1], g[2] = min(g[0], c[0]), max(g[1], c[0] + c[2]), g[2] + c[4]
+        else:
+            groups.append([c[0], c[0] + c[2], c[4]])
+    if not groups:
+        return []
+    best = max(groups, key=lambda g: g[2])
+    return [[x0 + best[0], y0 + row_top, x0 + best[1], y0 + row_bot]]
 
 
 # ---------------------------------------------------------------------------
@@ -389,6 +457,74 @@ def build_trackers(boxes: dict) -> list[FieldTracker]:
     return trackers
 
 
+# Settled frames between separator captures. The ':' is static for the whole
+# match, so sampling every settled frame would write tens of thousands of
+# near-identical crops; 04_build_templates.py needs hundreds, and the
+# sub-pixel-phase diversity it feeds on comes from the field RE-FLOWING as
+# digits change width, which happens on the scale of seconds, not frames.
+SEPARATOR_CAPTURE_EVERY = 20
+
+
+def process_match_separators(match: str, manifest_fh, save: bool) -> None:
+    """Harvest the ':' separator only -- no OCR, no GPU (see
+    segment_separators). Kept as its own driver rather than a branch inside
+    process_match because it shares nothing with the digit path except the
+    video walk: there is no value to read, nothing to pair a glyph count
+    against, and no reason to load easyocr."""
+    boxes_path = DATA_DIR / f"{match}_overlay_boxes.json"
+    video_path = ROOT.parent / f"{match}.mp4"
+    if not boxes_path.exists() or not video_path.exists():
+        print(f"[skip] {match}: missing boxes or video", file=sys.stderr)
+        return
+
+    boxes = json.loads(boxes_path.read_text())["boxes"]
+    trackers = [t for t in build_trackers(boxes) if t.kind == "clock"]
+    if not trackers:
+        print(f"[skip] {match}: no clock field", file=sys.stderr)
+        return
+
+    cap = cv2.VideoCapture(str(video_path))
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    lo, hi = int(total * START_FRAC), int(total * END_FRAC)
+    cap.set(cv2.CAP_PROP_POS_FRAMES, lo)
+
+    prev = {t.name: None for t in trackers}
+    settled = {t.name: 0 for t in trackers}
+    n_saved = 0
+    for frame_idx in range(lo, hi):
+        if (frame_idx - lo) % STRIDE != 0:
+            cap.grab()
+            continue
+        ok, frame = cap.read()
+        if not ok:
+            break
+        for t in trackers:
+            crop = frame[t.box[1]:t.box[3], t.box[0]:t.box[2]]
+            if crop.size == 0:
+                continue
+            if prev[t.name] is not None and not _looks_changed(prev[t.name], crop):
+                settled[t.name] += 1
+                if settled[t.name] % SEPARATOR_CAPTURE_EVERY == 0:
+                    for sbox in segment_separators(frame, t.box, t.polarity):
+                        if not save:
+                            n_saved += 1
+                            continue
+                        out_dir = INSTANCES_DIR / t.kind / "sep"
+                        out_dir.mkdir(parents=True, exist_ok=True)
+                        gx0, gy0, gx1, gy1 = sbox
+                        name = f"{match}_{t.name}_f{frame_idx}_s0.png"
+                        cv2.imwrite(str(out_dir / name), frame[gy0:gy1, gx0:gx1])
+                        manifest_fh.write(json.dumps({
+                            "match": match, "field": t.name, "frame": frame_idx, "slot": 0,
+                            "kind": t.kind, "digit": "sep", "box": sbox,
+                            "file": str((out_dir / name).relative_to(DATA_DIR)),
+                        }) + "\n")
+                        n_saved += 1
+            prev[t.name] = crop
+    cap.release()
+    print(f"[done] {match}: {n_saved} separator instance(s)", file=sys.stderr)
+
+
 def process_match(match: str, manifest_fh, save: bool) -> None:
     boxes_path = DATA_DIR / f"{match}_overlay_boxes.json"
     video_path = ROOT.parent / f"{match}.mp4"
@@ -446,14 +582,17 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--matches", nargs="+", default=DEFAULT_MATCHES)
     ap.add_argument("--save", action="store_true", help="write crops + manifest.jsonl (omit for a dry-run count)")
+    ap.add_argument("--separators", action="store_true",
+                    help="harvest the clock ':' only -- no OCR/GPU (see segment_separators)")
     args = ap.parse_args()
 
     INSTANCES_DIR.mkdir(parents=True, exist_ok=True)
     manifest_path = INSTANCES_DIR / "manifest.jsonl"
     mode = "a" if manifest_path.exists() else "w"
+    driver = process_match_separators if args.separators else process_match
     with open(manifest_path, mode) as fh:
         for match in args.matches:
-            process_match(match, fh, args.save)
+            driver(match, fh, args.save)
 
     print(f"[save] manifest -> {manifest_path}" if args.save else "[dry-run] nothing written (pass --save)",
           file=sys.stderr)
