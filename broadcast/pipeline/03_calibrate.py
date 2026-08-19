@@ -85,16 +85,15 @@ Known limitations / unvalidated
   reject most garbage implicitly (unrelated content rarely happens to
   segment into exactly N glyphs matching an N-digit OCR read), not a
   guarantee.
-- match8 has NO usable boxes at all (confirmed separately, not a bug in
-  this file or 02_detect_overlay.py): the video is trimmed to start already
-  mid-auto (RED 1 / BLUE 8 / clock 0:17 visible at frame 0), so there is no
-  pre-match zero anywhere in the file for 02's disambiguation to confirm
-  against. Skipped by user decision rather than building a fallback
-  confirmation strategy for it right now.
+- match8 was unusable under the OLD role-based 02/03 (no pre-match zero in
+  the file for role disambiguation to confirm against) -- no longer true
+  post-refactor: 02 emits regions by behaviour, not roles, so it needs no
+  pre-match zero, and match8_regions_timeline.json now exists. Included in
+  DEFAULT_MATCHES.
 
 Usage
 -----
-  python pipeline/03_calibrate.py --matches match1 match2 match3 match4 match6 match7 match9 match10 --save
+  python pipeline/03_calibrate.py --matches match1 match2 match3 match4 match6 match7 match8 match9 match10 --save
 
 Install: pip install opencv-python numpy easyocr torch
 """
@@ -108,7 +107,7 @@ ROOT = pathlib.Path(__file__).parent.parent
 DATA_DIR = ROOT / "data"
 INSTANCES_DIR = DATA_DIR / "digit_instances"
 
-DEFAULT_MATCHES = ["match1", "match2", "match3", "match4", "match6", "match7", "match9", "match10"]
+DEFAULT_MATCHES = ["match1", "match2", "match3", "match4", "match6", "match7", "match8", "match9", "match10"]
 
 # ---------------------------------------------------------------------------
 # Frame sampling
@@ -120,6 +119,15 @@ DEFAULT_MATCHES = ["match1", "match2", "match3", "match4", "match6", "match7", "
 # this purpose specifically, unlike 02's temporal-activity sampling which
 # needs a spread-out but sparse set of frames for a different statistic.
 STRIDE = 4
+
+# Structural (no-OCR) harvest of ':' and '/' samples every settled frame, not
+# just once per field-value change -- unlike digit capture, which triggers
+# only on a NEW value (see FieldTracker), a separator's own pixels are
+# identical on every frame of a run, so "every settled frame" would mean
+# hundreds of byte-identical duplicates per run. Capturing every Nth settled
+# frame instead still spans multiple runs (-> multiple sub-pixel phases,
+# same reason 03 wants many digit instances) without the redundant I/O.
+SEPARATOR_CAPTURE_EVERY = 20
 
 # Same reasoning as 02_detect_overlay.py's SAMPLE_END_FRAC: dodges known
 # post-match bookend content (title cards, celebration b-roll -- confirmed
@@ -226,6 +234,25 @@ MIN_GLYPH_HEIGHT_FRAC = 0.5
 MIN_GLYPH_WH_RATIO = 0.30
 MAX_GLYPH_WH_RATIO = 0.95
 
+# A badge/counter field can render a fraction ("105 / 240"), and the '/' is a
+# full-height diagonal stroke -- tall and narrow enough (h_frac~0.85-0.97,
+# w/h~0.44-0.62) to pass the digit geometry filters above and get treated as
+# an (uncounted-for) extra digit slot, which is exactly the bug that made '/'
+# invisible to calibration: it silently desyncs segment_glyphs' component
+# count from the OCR digit string's length, so 03 skips the ENTIRE frame
+# rather than the one glyph (see FieldTracker._capture). Distinguished from
+# every real digit by slope, not size: split a component into its top and
+# bottom thirds and compare each third's mean ink column. A '/' leans hard
+# left-to-right across nearly its whole height; the most diagonal real digit
+# (a slanted '7') only leans in its lower portion. Measured on real harvested
+# glyphs (badge+score, ~80 samples/digit) plus three real '/' instances
+# spanning three matches/rendering scales (box_h 23/24/40px): every digit
+# fell in [-0.332, 0.218], every '/' measured -0.51 to -0.62 -- a wide, clean
+# gap. -0.40 sits in the middle of that gap, not at either edge.
+SLASH_METRIC_TOP_FRAC = 0.3
+SLASH_METRIC_BOT_FRAC = 0.7
+SLASH_METRIC_MAX = -0.40
+
 # ---------------------------------------------------------------------------
 # OCR (same approach as 02_detect_overlay.py, duplicated rather than
 # imported -- 02's filename starts with a digit so it isn't a valid Python
@@ -284,9 +311,41 @@ def field_mask(crop_bgr: np.ndarray, polarity: str) -> np.ndarray:
     return (val <= VAL_MAX_DARK).astype(np.uint8)
 
 
+def _diagonal_metric(comp_mask: np.ndarray) -> float | None:
+    """Normalized left-right lean of a component's ink, comparing its top
+    30% to its bottom 70% (SLASH_METRIC_TOP_FRAC/BOT_FRAC) -- see
+    SLASH_METRIC_MAX's comment for what separates a real digit from '/'.
+    None if there isn't enough ink in both bands to measure."""
+    h, w = comp_mask.shape
+    ys, xs = np.nonzero(comp_mask)
+    top_xs = xs[ys < h * SLASH_METRIC_TOP_FRAC]
+    bot_xs = xs[ys > h * SLASH_METRIC_BOT_FRAC]
+    if top_xs.size < 3 or bot_xs.size < 3:
+        return None
+    return (float(bot_xs.mean()) - float(top_xs.mean())) / w
+
+
+def normalize_polarity(crop_bgr: np.ndarray, polarity: str) -> np.ndarray:
+    """Saved glyph crops need ONE convention regardless of the source
+    region's polarity, or 04_build_templates.py's per-pixel median merge
+    blends photographic negatives of each other. The old role-based harvest
+    got this for free -- 'clock' was hardcoded dark-on-light and lived in its
+    own kind dir, which 04 inverted by name. Post-refactor, `kind` is a
+    single pooled "all" bucket fed by whatever polarity 05_extract.py
+    measured per region (see build_trackers) -- light and dark regions land
+    in the SAME digit directories, so kind-name-based inversion in 04 can no
+    longer tell them apart. Normalizing HERE instead, at save time, means 04
+    doesn't need to know polarity at all: every new crop is already
+    bright-ink-on-dark, the same convention 04's clock-inversion produced,
+    so old and new instances merge into the same bucket without contradicting
+    each other."""
+    return 255 - crop_bgr if polarity == "dark" else crop_bgr
+
+
 def segment_glyphs(frame_bgr: np.ndarray, box: list[int], polarity: str) -> list[list[int]]:
     """Individual glyph boxes (absolute frame coords, left-to-right,
-    separators dropped) inside `box`."""
+    separators AND '/' dropped -- see segment_slashes for the latter,
+    harvested separately) inside `box`."""
     x0, y0, x1, y1 = box
     crop = frame_bgr[y0:y1, x0:x1]
     if crop.size == 0:
@@ -294,7 +353,7 @@ def segment_glyphs(frame_bgr: np.ndarray, box: list[int], polarity: str) -> list
     mask = field_mask(crop, polarity)
 
     box_h = y1 - y0
-    n_labels, _, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
     digits = []
     for lbl in range(1, n_labels):
         bx, by, bw, bh, barea = stats[lbl]
@@ -307,9 +366,36 @@ def segment_glyphs(frame_bgr: np.ndarray, box: list[int], polarity: str) -> list
             continue
         if not (MIN_GLYPH_WH_RATIO <= bw / bh <= MAX_GLYPH_WH_RATIO):
             continue
+        comp_mask = (labels[by:by + bh, bx:bx + bw] == lbl)
+        if (_diagonal_metric(comp_mask) or 0) <= SLASH_METRIC_MAX:
+            continue
         digits.append([x0 + int(bx), y0 + int(by), x0 + int(bx) + int(bw), y0 + int(by) + int(bh)])
     digits.sort(key=lambda c: c[0])
     return digits
+
+
+def segment_slashes(frame_bgr: np.ndarray, box: list[int], polarity: str) -> list[list[int]]:
+    """The fraction separator '/' inside `box`, as ONE box, or [] if there
+    isn't one -- the digit-shaped-but-diagonal component segment_glyphs
+    excludes (see SLASH_METRIC_MAX). No OCR, same reason as
+    segment_separators: identified structurally, not read."""
+    x0, y0, x1, y1 = box
+    crop = frame_bgr[y0:y1, x0:x1]
+    if crop.size == 0:
+        return []
+    mask = field_mask(crop, polarity)
+    box_h = y1 - y0
+    n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    for lbl in range(1, n_labels):
+        bx, by, bw, bh, barea = stats[lbl]
+        if barea < MIN_GLYPH_AREA_PX or bh < box_h * MIN_GLYPH_HEIGHT_FRAC:
+            continue
+        if not (MIN_GLYPH_WH_RATIO <= bw / bh <= MAX_GLYPH_WH_RATIO):
+            continue
+        comp_mask = (labels[by:by + bh, bx:bx + bw] == lbl)
+        if (_diagonal_metric(comp_mask) or 0) <= SLASH_METRIC_MAX:
+            return [[x0 + int(bx), y0 + int(by), x0 + int(bx) + int(bw), y0 + int(by) + int(bh)]]
+    return []
 
 
 def segment_separators(frame_bgr: np.ndarray, box: list[int], polarity: str) -> list[list[int]]:
@@ -435,7 +521,7 @@ class FieldTracker:
             self.n_skipped_mismatch += 1
             return
         for slot, (gbox, ch) in enumerate(zip(glyph_boxes, value)):
-            sink(self.kind, ch, self.name, frame_idx, slot, gbox, frame_bgr)
+            sink(self.kind, ch, self.name, frame_idx, slot, gbox, frame_bgr, self.polarity)
         self.n_captured += 1
 
 
@@ -443,44 +529,51 @@ class FieldTracker:
 # Per-match driver
 # ---------------------------------------------------------------------------
 
-def build_trackers(boxes: dict) -> list[FieldTracker]:
+def build_trackers(doc: dict) -> list:
+    """Trackers for harvesting, from 05_extract.py's regions timeline.
+
+    Reads <match>_regions_timeline.json rather than a role-keyed box file
+    because 02_detect_overlay.py no longer assigns roles -- it emits regions
+    and nothing else (see its module docstring for the nine wrong boxes that
+    change removed). Everything this function used to hardcode is now taken
+    from what 05 MEASURED per region: polarity, and the glyph height that
+    tells segment_glyphs what scale it is working at.
+
+    `kind` is now a single pooled bucket. Keeping score/badge/clock apart was
+    never carrying information -- they share a typeface (cross-kind same-digit
+    NCC 0.93-0.98, aspect ratios agreeing to 0.02) -- and pooling means one
+    template per character instead of three near-identical ones.
+
+    NOT RE-RUN SINCE THE REFACTOR: harvesting needs easyocr on a GPU, and the
+    existing template bank under data/digit_templates/ was built before it and
+    remains valid. Treat this path as untested until it is next exercised.
+    """
     trackers = []
-    if "blue_score" in boxes:
-        trackers.append(FieldTracker("blue_score", boxes["blue_score"]["box"], "light", "score", False))
-    if "red_score" in boxes:
-        trackers.append(FieldTracker("red_score", boxes["red_score"]["box"], "light", "score", False))
-    if "clock" in boxes:
-        trackers.append(FieldTracker("clock", boxes["clock"]["box"], "dark", "clock", True))
-    for side in ("blue_badges", "red_badges"):
-        for i, badge in enumerate(boxes.get(side, [])):
-            trackers.append(FieldTracker(f"{side}[{i}]", badge["box"], "light", "badge", False))
+    for rid, meta in sorted((doc.get("regions") or {}).items()):
+        trackers.append(FieldTracker(rid, meta["box"], meta["polarity"], "all",
+                                     allow_colon=True))
     return trackers
 
 
-# Settled frames between separator captures. The ':' is static for the whole
-# match, so sampling every settled frame would write tens of thousands of
-# near-identical crops; 04_build_templates.py needs hundreds, and the
-# sub-pixel-phase diversity it feeds on comes from the field RE-FLOWING as
-# digits change width, which happens on the scale of seconds, not frames.
-SEPARATOR_CAPTURE_EVERY = 20
-
-
 def process_match_separators(match: str, manifest_fh, save: bool) -> None:
-    """Harvest the ':' separator only -- no OCR, no GPU (see
-    segment_separators). Kept as its own driver rather than a branch inside
+    """Harvest ':' (segment_separators) and '/' (segment_slashes) -- no OCR,
+    no GPU for either. Kept as its own driver rather than a branch inside
     process_match because it shares nothing with the digit path except the
     video walk: there is no value to read, nothing to pair a glyph count
-    against, and no reason to load easyocr."""
-    boxes_path = DATA_DIR / f"{match}_overlay_boxes.json"
+    against, and no reason to load easyocr. Both structural detectors run on
+    every field regardless of which glyph they're actually built for --
+    a clock field simply never produces a slash candidate and a badge field
+    never produces a colon candidate, so there is no need to know in advance
+    which fields carry which separator."""
+    boxes_path = DATA_DIR / f"{match}_regions_timeline.json"
     video_path = ROOT.parent / f"{match}.mp4"
     if not boxes_path.exists() or not video_path.exists():
         print(f"[skip] {match}: missing boxes or video", file=sys.stderr)
         return
 
-    boxes = json.loads(boxes_path.read_text())["boxes"]
-    trackers = [t for t in build_trackers(boxes) if t.kind == "clock"]
+    trackers = build_trackers(json.loads(boxes_path.read_text()))
     if not trackers:
-        print(f"[skip] {match}: no clock field", file=sys.stderr)
+        print(f"[skip] {match}: no confirmed numeric fields", file=sys.stderr)
         return
 
     cap = cv2.VideoCapture(str(video_path))
@@ -505,18 +598,21 @@ def process_match_separators(match: str, manifest_fh, save: bool) -> None:
             if prev[t.name] is not None and not _looks_changed(prev[t.name], crop):
                 settled[t.name] += 1
                 if settled[t.name] % SEPARATOR_CAPTURE_EVERY == 0:
-                    for sbox in segment_separators(frame, t.box, t.polarity):
+                    candidates = ([("sep", sbox) for sbox in segment_separators(frame, t.box, t.polarity)] +
+                                  [("slash", sbox) for sbox in segment_slashes(frame, t.box, t.polarity)])
+                    for digit_name, sbox in candidates:
                         if not save:
                             n_saved += 1
                             continue
-                        out_dir = INSTANCES_DIR / t.kind / "sep"
+                        out_dir = INSTANCES_DIR / t.kind / digit_name
                         out_dir.mkdir(parents=True, exist_ok=True)
                         gx0, gy0, gx1, gy1 = sbox
+                        crop_norm = normalize_polarity(frame[gy0:gy1, gx0:gx1], t.polarity)
                         name = f"{match}_{t.name}_f{frame_idx}_s0.png"
-                        cv2.imwrite(str(out_dir / name), frame[gy0:gy1, gx0:gx1])
+                        cv2.imwrite(str(out_dir / name), crop_norm)
                         manifest_fh.write(json.dumps({
                             "match": match, "field": t.name, "frame": frame_idx, "slot": 0,
-                            "kind": t.kind, "digit": "sep", "box": sbox,
+                            "kind": t.kind, "digit": digit_name, "box": sbox,
                             "file": str((out_dir / name).relative_to(DATA_DIR)),
                         }) + "\n")
                         n_saved += 1
@@ -526,17 +622,16 @@ def process_match_separators(match: str, manifest_fh, save: bool) -> None:
 
 
 def process_match(match: str, manifest_fh, save: bool) -> None:
-    boxes_path = DATA_DIR / f"{match}_overlay_boxes.json"
+    boxes_path = DATA_DIR / f"{match}_regions_timeline.json"
     video_path = ROOT.parent / f"{match}.mp4"
     if not boxes_path.exists():
-        print(f"[skip] {match}: no {boxes_path.name} -- run 02_detect_overlay.py --save first", file=sys.stderr)
+        print(f"[skip] {match}: no {boxes_path.name} -- run 05_extract.py --save first", file=sys.stderr)
         return
     if not video_path.exists():
         print(f"[skip] {match}: video not found at {video_path}", file=sys.stderr)
         return
 
-    boxes = json.loads(boxes_path.read_text())["boxes"]
-    trackers = build_trackers(boxes)
+    trackers = build_trackers(json.loads(boxes_path.read_text()))
     if not trackers:
         print(f"[skip] {match}: no confirmed numeric fields in {boxes_path.name}", file=sys.stderr)
         return
@@ -547,13 +642,13 @@ def process_match(match: str, manifest_fh, save: bool) -> None:
     print(f"[scan] {match}: frames {lo}-{hi} of {total}, stride={STRIDE}, "
           f"{len(trackers)} field(s): {[t.name for t in trackers]}", file=sys.stderr)
 
-    def sink(kind, digit, field, frame_idx, slot, gbox, frame_bgr):
+    def sink(kind, digit, field, frame_idx, slot, gbox, frame_bgr, polarity):
         if not save:
             return
         out_dir = INSTANCES_DIR / kind / digit
         out_dir.mkdir(parents=True, exist_ok=True)
         gx0, gy0, gx1, gy1 = gbox
-        glyph_crop = frame_bgr[gy0:gy1, gx0:gx1]
+        glyph_crop = normalize_polarity(frame_bgr[gy0:gy1, gx0:gx1], polarity)
         out_name = f"{match}_{field}_f{frame_idx}_s{slot}.png"
         cv2.imwrite(str(out_dir / out_name), glyph_crop)
         manifest_fh.write(json.dumps({
@@ -583,7 +678,7 @@ def main():
     ap.add_argument("--matches", nargs="+", default=DEFAULT_MATCHES)
     ap.add_argument("--save", action="store_true", help="write crops + manifest.jsonl (omit for a dry-run count)")
     ap.add_argument("--separators", action="store_true",
-                    help="harvest the clock ':' only -- no OCR/GPU (see segment_separators)")
+                    help="harvest ':' and '/' only -- no OCR/GPU (see segment_separators/segment_slashes)")
     args = ap.parse_args()
 
     INSTANCES_DIR.mkdir(parents=True, exist_ok=True)

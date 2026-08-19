@@ -22,7 +22,13 @@ For each (kind, digit) bucket under data/digit_instances/<kind>/<digit>/:
    presentation/matching-convenience choice, not a claim that clock and
    score share a font -- badge/score/clock stay in separate buckets
    throughout (never averaged into each other), only the OUTPUT convention
-   is unified.
+   is unified. Legacy path only: post-refactor, `kind` is a single pooled
+   "all" bucket mixing both polarities (see build_trackers in
+   03_calibrate.py), so a directory-name check can no longer tell them
+   apart -- 03 now normalizes polarity itself at harvest time
+   (normalize_polarity), before a crop is ever written to disk, so "all"
+   instances arrive here already bright-on-dark and this check correctly
+   leaves them alone.
 2. Resize every crop in the bucket to the bucket's own MEDIAN (w, h) via
    cubic interpolation. Crops already come out of connected-component
    bounding boxes tightly wrapping the glyph, so instance-to-instance size
