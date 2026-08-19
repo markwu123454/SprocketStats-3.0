@@ -1,8 +1,7 @@
 {
-  "layout": "stacked",
   "views": [
     {
-      "name": "main",
+      "name": "view0",
       "box": [
         0,
         0,
@@ -13,26 +12,26 @@
       "fraction": 0.652
     },
     {
-      "name": "bot_left",
+      "name": "view1",
       "box": [
         0,
-        744,
+        746,
         944,
         1080
       ],
-      "area": 317184,
-      "fraction": 0.153
+      "area": 315296,
+      "fraction": 0.152
     },
     {
-      "name": "bot_right",
+      "name": "view2",
       "box": [
         975,
-        744,
+        746,
         1920,
         1080
       ],
-      "area": 317520,
-      "fraction": 0.153
+      "area": 315630,
+      "fraction": 0.152
     }
   ],
   "img_w": 1920,

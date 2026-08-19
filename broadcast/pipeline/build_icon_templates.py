@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Build icon-matching templates from sourced reference art (NOT harvested from
-broadcast video). Unlike digit_templates (03_calibrate.py + 04_build_templates.py,
+broadcast video). Unlike digit_templates (tools/calibrate.py + tools/build_templates.py,
 which fuse hundreds of low-res broadcast-rendered instances because the font
 and rendering scale vary by broadcast), the FRC game-piece pictogram next to
 each counter badge is a small, fixed, officially-published set -- one clean
@@ -20,7 +20,7 @@ Algorithm
    around the square (easier to crop generously by hand than pixel-perfect),
    so this step does the precise crop: largest connected component of
    near-white pixels (high value, low saturation -- same test as
-   06_identify.py's hue_class "white" bucket), bounding box of that
+   04_identify.py's hue_class "white" bucket), bounding box of that
    component.
 2. Within the crop, threshold the icon ink out of the white background via
    per-image Otsu on grayscale. This is deliberately NOT a fixed brightness
@@ -57,8 +57,10 @@ Known limitations / unvalidated
 Usage
 -----
   python pipeline/build_icon_templates.py
+  python pipeline/build_icon_templates.py --compare  # also write debug strips
 """
 
+import argparse
 import pathlib
 import sys
 
@@ -71,7 +73,7 @@ SRC_DIR = DATA_DIR / "icon_templates_src"
 OUT_DIR = DATA_DIR / "icon_templates"
 
 # Near-white test for locating the square: bright and low-saturation. Same
-# thresholds as 06_identify.py's hue_class "white" bucket, since it's the
+# thresholds as 04_identify.py's hue_class "white" bucket, since it's the
 # same visual thing (a white chip) seen at higher resolution here.
 WHITE_VAL_MIN = 160
 WHITE_SAT_MAX = 40
@@ -138,7 +140,7 @@ def check_mask(mask):
     return warnings
 
 
-def build_one(src_path: pathlib.Path):
+def build_one(src_path: pathlib.Path, compare: bool = False):
     img = cv2.imread(str(src_path))
     if img is None:
         print(f"[skip] {src_path.name}: not readable as an image", file=sys.stderr)
@@ -163,14 +165,15 @@ def build_one(src_path: pathlib.Path):
     name = src_path.stem
     cv2.imwrite(str(OUT_DIR / f"{name}.png"), mask)
 
-    # Compare strip: source (resized to crop height) | crop | mask, so a bad
-    # square-localization or a threshold that ate half the icon is visible
-    # at a glance instead of trusted from a shape check.
-    src_scaled = cv2.resize(img, (int(img.shape[1] * h / img.shape[0]), h))
-    mask_bgr = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
-    pad = np.full((h, 4, 3), 128, np.uint8)
-    strip = np.hstack([src_scaled, pad, crop, pad, mask_bgr])
-    cv2.imwrite(str(OUT_DIR / f"{name}_compare.png"), strip)
+    if compare:
+        # Compare strip: source (resized to crop height) | crop | mask, so a
+        # bad square-localization or a threshold that ate half the icon is
+        # visible at a glance instead of trusted from a shape check.
+        src_scaled = cv2.resize(img, (int(img.shape[1] * h / img.shape[0]), h))
+        mask_bgr = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+        pad = np.full((h, 4, 3), 128, np.uint8)
+        strip = np.hstack([src_scaled, pad, crop, pad, mask_bgr])
+        cv2.imwrite(str(OUT_DIR / f"{name}_compare.png"), strip)
 
     warnings = check_mask(mask)
     status = "ok" if not warnings else "WARN"
@@ -180,6 +183,11 @@ def build_one(src_path: pathlib.Path):
 
 
 def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--compare", action="store_true",
+                    help="also write a {name}_compare.png source|crop|mask debug strip per icon")
+    args = ap.parse_args()
+
     if not SRC_DIR.exists():
         print(f"[error] {SRC_DIR} does not exist", file=sys.stderr)
         return
@@ -189,7 +197,7 @@ def main():
         print(f"[error] no source images in {SRC_DIR}", file=sys.stderr)
         return
     for src in sources:
-        build_one(src)
+        build_one(src, compare=args.compare)
 
 
 if __name__ == "__main__":

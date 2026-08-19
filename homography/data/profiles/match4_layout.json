@@ -1,38 +1,37 @@
 {
-  "layout": "stacked",
   "views": [
     {
-      "name": "main",
+      "name": "view0",
       "box": [
         0,
         0,
         1920,
-        710
+        705
       ],
-      "area": 1363200,
-      "fraction": 0.657
+      "area": 1353600,
+      "fraction": 0.653
     },
     {
-      "name": "bot_left",
+      "name": "view1",
       "box": [
         0,
-        744,
-        940,
+        750,
+        939,
         1080
       ],
-      "area": 315840,
-      "fraction": 0.152
+      "area": 309870,
+      "fraction": 0.149
     },
     {
-      "name": "bot_right",
+      "name": "view2",
       "box": [
         977,
-        744,
+        750,
         1920,
         1080
       ],
-      "area": 316848,
-      "fraction": 0.153
+      "area": 311190,
+      "fraction": 0.15
     }
   ],
   "img_w": 1920,

@@ -31,19 +31,19 @@ modes was a semantic assumption meeting a broadcast that did not share it:
 None of that is fixable by better thresholds, because the information needed
 to decide arrives LATER: what a region means is far easier to see from how
 its value behaves across a whole match than from one frame before it starts.
-So identity moved to 06_identify.py, which reads 05's timelines, and this
-file was cut back to the part it can actually measure.
+So identity moved to 04_identify.py, which reads 03_extract.py's timelines,
+and this file was cut back to the part it can actually measure.
 
 The split, concretely: this file may use pixel colour as a SIMILARITY signal
 (two pockets sit on the same chip, so they are one field) but never as a
 NAME (this chip is blue, therefore blue alliance) -- naming is a
-season-specific convention and belongs in 06. Colour-as-similarity stays
-entirely internal to the merge step (merge_pockets/background_stats) and is
-not exported: 06_identify.py has its own frame access now and samples
+season-specific convention and belongs in 04_identify.py. Colour-as-similarity
+stays entirely internal to the merge step (merge_pockets/background_stats)
+and is not exported: 04_identify.py has its own frame access now and samples
 colour itself, from however many frames it needs, when it decides what a
 region means. Dropping the naming also drops easyocr/torch from this file
--- the whole pipeline is now OCR-free apart from 03_calibrate.py's template
-harvesting.
+-- the whole pipeline is now OCR-free apart from tools/calibrate.py's
+template harvesting.
 
 Algorithm
 ---------
@@ -97,7 +97,7 @@ data/<match>_regions.json:
 }
 Regions are ordered left-to-right, top-to-bottom, and `id` is positional
 only -- it carries no meaning and is not stable across reruns if the
-detection changes. 05_extract.py reads every region; 06_identify.py decides
+detection changes. 03_extract.py reads every region; 04_identify.py decides
 which ones matter.
 
 Known limitations / unvalidated constants
@@ -116,7 +116,7 @@ Known limitations / unvalidated constants
   A truly static number sharing a chip with nothing dynamic will be missed.
 - This file no longer rejects regions that are not numbers at all (match6
   has a pocket on a field-wall sign reading "REBUILT"). That is deliberate:
-  05_extract.py's triage answers "does this decode as digits" far better
+  03_extract.py's triage answers "does this decode as digits" far better
   than any geometric test here could, and it does so by measurement.
 
 Usage
@@ -279,7 +279,7 @@ def background_stats(frame_bgr: np.ndarray, box: list, margin: int = BG_RING_MAR
     """Median BGR and per-channel spread of the ring just outside `box`.
     Returns (median_bgr, std) or (None, None). Used only internally by
     merge_pockets, as a SIMILARITY signal for deciding which pockets belong
-    to the same chip -- not exported. 06_identify.py now has its own frame
+    to the same chip -- not exported. 04_identify.py now has its own frame
     access and samples colour itself when it needs to decide what a region
     means."""
     h, w = frame_bgr.shape[:2]

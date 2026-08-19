@@ -1,19 +1,18 @@
 {
-  "layout": "stacked",
   "views": [
     {
-      "name": "main",
+      "name": "view0",
       "box": [
         0,
-        0,
+        73,
         1920,
-        727
+        726
       ],
-      "area": 1395840,
-      "fraction": 0.673
+      "area": 1253760,
+      "fraction": 0.605
     },
     {
-      "name": "bot_left",
+      "name": "view1",
       "box": [
         0,
         733,

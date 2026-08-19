@@ -1,0 +1,28 @@
+# ============================================================
+# YOLO AprilTag Detection — config
+# ============================================================
+
+label_studio:
+  base_url: "https://app.humansignal.com"
+  project_id: 279391
+
+r2:
+  bucket: "assets"
+  local_image_root: "data/tags_raw"
+
+classes:
+  - apriltag   # class 0 — all labels merged
+
+train:
+  model: "yolo26n.pt"
+  epochs: 100
+  imgsz: 1280
+  batch: 8
+  val_frac: 0.20
+  seed: 42
+  device: 0
+
+paths:
+  export_dir:   "data/tags_exports"
+  dataset_yaml: "data/tags_dataset.yaml"
+  runs_dir:     "data/tags_runs"
