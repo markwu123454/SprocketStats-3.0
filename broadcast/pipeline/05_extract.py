@@ -7,7 +7,10 @@ Nothing more. No roles, no field names, no alliance, no match window, no
 decide them (see "Why this file knows nothing" below).
 
 Reading is TEMPLATE SEARCH against the digit bank 04_build_templates.py
-built, not OCR. No easyocr/torch import anywhere in this file.
+built, not OCR. No easyocr import anywhere in this file. torch IS imported,
+but only as an optional GPU backend for the correlation math below (see
+"GPU decode" section) -- if it or CUDA is unavailable, everything falls back
+to the original cv2-only path unchanged.
 
 Why this file knows nothing
 ---------------------------
@@ -103,6 +106,67 @@ NOTHING here, because skipped columns are free. Region precision matters in
 one direction only -- too narrow is fatal, too wide is harmless right up to
 the point where it swallows a neighbouring number.
 
+GPU decode
+----------
+Profiled on match6 (its heaviest case, 32 kept regions): decode_field is
+~99% of total runtime, and inside it cv2.matchTemplate is 85% (12.26s of
+14.44s over 1920 calls) -- the DP loop above is noise by comparison. Each
+call does ~2 matchTemplate calls (NCC + overlap) per (char, WIDTH_JITTER_PX)
+variant, one tiny call at a time. That is the actual optimization target,
+not STRIDE/VOTE_STRIDE: video decode and the settle check together cost
+under 4ms per frame across every region combined (measured), so sampling
+more frames is nearly free -- the whole budget is in the per-variant
+correlation itself.
+
+build_gpu_bank/gpu_correlate replace the per-variant matchTemplate loop with
+ONE batched conv2d pass per region per frame, computing every character x
+width variant at once instead of ~15-30 separate calls:
+
+* cv2's TM_CCOEFF_NORMED has no native batched-GPU equivalent, so it is
+  reimplemented via the standard box-filter trick: cross = conv(image,
+  mean-centered template), local variance = conv(image^2, mask) -
+  conv(image, mask)^2/N, ncc = cross / sqrt(template_energy * local_var).
+  TM_CCORR is just conv(mask_image, raw_template) directly -- that one IS
+  what conv2d natively computes.
+* Templates in one region vary in WIDTH (both across characters and across
+  WIDTH_JITTER_PX), which a single conv2d call can't mix -- one call needs
+  one kernel size. Fixed by zero-padding every template to the region's own
+  widest variant and using a per-template BINARY MASK (not a shared
+  ones-kernel) for the local-sum terms, so each channel's "local" statistics
+  are still computed over its own true footprint despite the shared padded
+  kernel shape. The crop is right-padded by (w_max - 1) columns for the same
+  reason, so a narrow template's valid output range isn't truncated by
+  another template's larger kernel size (padding contributes nothing to any
+  channel's sum, since the padded region is zero-weighted).
+* MUST run in float64, not float32: local variance above is a difference of
+  two same-magnitude terms (local_sumsq and local_sum^2/N), and for a
+  near-uniform window (background, no ink) both can run into the millions
+  while their difference -- the true variance -- is under 1. Measured
+  directly: float32 gave ncc=-1.67 (then clamped to -1.0) where cv2 gives
+  -0.129, a 0.87 error, on a real match8 frame. float64 fixed it to within
+  0.002 of cv2 across ~3800 (region, frame, template) comparisons on 6
+  regions across 4 matches, with decode_field's actual decoded STRING
+  matching cv2 exactly on every one of 63 tested frames but one (the video's
+  last frame, degenerate/static content that both paths decode to garbage,
+  just different garbage). A single global mean-shift before squaring
+  (variance is shift-invariant, so this doesn't change the answer, only its
+  floating-point stability) was tried to recover float32 throughput and
+  still left a 0.2 error -- one global shift isn't close enough to every
+  window's own local mean; a real fix would need per-window recentering,
+  not attempted. Net measured speedup with float64: ~2x on match6 (32
+  regions, 300 frames: 52.16s CPU vs 26.47s GPU) -- real, but well short of
+  matchTemplate's 85%-of-runtime share, because H2D transfer is negligible
+  (0.024ms/call) while the conv2d kernels themselves, forced to float64 on a
+  consumer GPU with heavily throttled FP64 throughput, are the remaining
+  cost. Region-batching (one conv2d call per FRAME across all regions,
+  instead of one per region) was not attempted -- regions differ in crop
+  size and glyph_h, so batching them requires padding to a common canvas or
+  a grouped conv, and the per-region call overhead measured negligible
+  (H2D above) suggests the remaining cost is compute-bound, not
+  dispatch-bound, so batching may not help much further. Falls back to the
+  original cv2 path automatically if torch or CUDA is unavailable, or via
+  --cpu.
+
 Separators
 ----------
 ':' is ink, and an objective built on explaining ink has to explain it.
@@ -130,7 +194,7 @@ Output
 data/<match>_regions_timeline.json:
 {
   "match":.., "fps":.., "n_decodes":..,
-  "regions": {"r07": {"box":.., "polarity":.., "glyph_h":.., "bg_bgr":..,
+  "regions": {"r07": {"box":.., "polarity":.., "glyph_h":..,
                       "chars":.., "n_runs":..}, ...},
   "dropped": [{"id":.., "box":.., "reason":..}, ...],
   "events": [{"region":"r07", "frame":.., "end_frame":.., "t_sec":..,
@@ -156,16 +220,29 @@ Known limitations / unvalidated
   well.
 - GAMMA, WIDTH_JITTER_PX, VSEARCH_PX, N_CALIB_FRAMES and the triage
   thresholds are swept or reasoned starting points, not jointly optimized.
+- GPU decode's ~2x is well short of matchTemplate's 85%-of-runtime share --
+  see "GPU decode" above for what was tried (float32 + global mean-shift)
+  and why it wasn't enough on its own. Region-batching (one conv2d call per
+  frame across every region, not one per region) is the untried next lever.
+- Calibration (calibrate_region) always uses the CPU path -- it is a small,
+  one-time cost per match (~30s measured) next to the main scan (minutes),
+  so it wasn't worth threading GPU support through a second call site.
 
 Usage
 -----
   python pipeline/05_extract.py --match match1 --save
+  python pipeline/05_extract.py --match match1 --save --cpu   # force the cv2-only path
 """
 
 import argparse, collections, importlib.util, json, pathlib, sys, time
 
 import cv2
 import numpy as np
+
+try:
+    import torch
+except ImportError:
+    torch = None
 
 ROOT = pathlib.Path(__file__).parent.parent
 DATA_DIR = ROOT / "data"
@@ -300,6 +377,96 @@ def ink_extent(mask: np.ndarray):
 
 
 # ---------------------------------------------------------------------------
+# GPU decode (optional -- see module docstring's "GPU decode" section for
+# the batching design and the float64 requirement)
+# ---------------------------------------------------------------------------
+
+GPU_DEVICE = torch.device("cuda") if (torch is not None and torch.cuda.is_available()) else None
+
+
+def build_gpu_bank(scaled: dict):
+    """Precompute one region's batched correlation weights -- called ONCE
+    right after calibration (scaled is fixed for the whole match) and reused
+    for every decode_field call in the main scan. None if GPU unavailable or
+    the region has no variants."""
+    if GPU_DEVICE is None:
+        return None
+    variants = [(ch, w, tmpl, ink_mass) for ch, vs in scaled.items() for w, tmpl, ink_mass in vs]
+    if not variants:
+        return None
+    glyph_h = variants[0][2].shape[0]
+    w_max = max(w for _, w, _, _ in variants)
+    n = len(variants)
+    # Every template is zero-padded on the right to the region's widest
+    # variant, since one conv2d call needs one kernel size -- see the
+    # docstring for why this doesn't corrupt the per-template math (zero
+    # weight contributes nothing) and why the crop gets the matching
+    # right-padding in gpu_correlate (so a narrow template's own valid
+    # output range isn't cut short by another template's wider kernel).
+    mean_w = np.zeros((n, 1, glyph_h, w_max), dtype=np.float32)   # mean-centered, for the NCC cross term
+    mask_w = np.zeros((n, 1, glyph_h, w_max), dtype=np.float32)   # binary support, for local-window sums
+    raw_w = np.zeros((n, 1, glyph_h, w_max), dtype=np.float32)    # raw [0,1] template, for the TM_CCORR overlap term
+    sumT2 = np.zeros(n, dtype=np.float32)
+    v_char, v_w, v_ink = [], [], []
+    for i, (ch, w, tmpl, ink_mass) in enumerate(variants):
+        centered = tmpl - tmpl.mean()
+        mean_w[i, 0, :, :w] = centered
+        mask_w[i, 0, :, :w] = 1.0
+        raw_w[i, 0, :, :w] = tmpl
+        sumT2[i] = float((centered ** 2).sum())
+        v_char.append(ch); v_w.append(int(w)); v_ink.append(float(ink_mass))
+    t = lambda a: torch.from_numpy(a).double().to(GPU_DEVICE)
+    return {"mean_w": t(mean_w), "mask_w": t(mask_w), "raw_w": t(raw_w), "sumT2": t(sumT2),
+            "w_max": w_max, "glyph_h": glyph_h, "v_char": v_char, "v_w": v_w, "v_ink": v_ink}
+
+
+def gpu_correlate(gpu: dict, gband: np.ndarray, mband: np.ndarray, crop_w: int):
+    """Batched GPU replacement for the per-variant cv2.matchTemplate double
+    call in decode_field's CPU path below. Yields (ch, w, ink_mass, ncc_map,
+    tp_map) per variant, each map already sliced to that variant's own valid
+    (crop_w - w + 1)-wide range -- byte-for-byte the shape cv2.matchTemplate
+    would have returned for that template alone, so the caller's row-argmax
+    reduction is identical for both paths."""
+    device = gpu["mean_w"].device
+    pad = gpu["w_max"] - 1
+    band_h = gband.shape[0]
+    # float64 is load-bearing, not a precision nicety -- see the module
+    # docstring's "MUST run in float64" paragraph. local_var below is a
+    # difference of two same-magnitude (up to millions) terms for a
+    # near-uniform window, and float32 loses the result to cancellation.
+    g = torch.from_numpy(gband).double().to(device).view(1, 1, band_h, crop_w)
+    m = torch.from_numpy(mband).double().to(device).view(1, 1, band_h, crop_w)
+    if pad > 0:
+        g = torch.nn.functional.pad(g, (0, pad))
+        m = torch.nn.functional.pad(m, (0, pad))
+    with torch.no_grad():
+        cross = torch.nn.functional.conv2d(g, gpu["mean_w"])
+        local_sum = torch.nn.functional.conv2d(g, gpu["mask_w"])
+        local_sumsq = torch.nn.functional.conv2d(g * g, gpu["mask_w"])
+        tp = torch.nn.functional.conv2d(m, gpu["raw_w"]).squeeze(0)
+        N = torch.tensor(gpu["v_w"], dtype=torch.float64, device=device).view(1, -1, 1, 1) * gpu["glyph_h"]
+        local_var = (local_sumsq - local_sum * local_sum / N).clamp_min(0)
+        denom2 = gpu["sumT2"].view(1, -1, 1, 1) * local_var
+        # cv2 forces the correlation to 0 rather than dividing when the
+        # window is too flat to normalize meaningfully (near-zero local
+        # variance) -- matching that here, rather than letting a tiny
+        # denominator blow the ratio up, is what the degenerate/clamp pair
+        # below replicates.
+        degenerate = denom2 < 1e-3
+        denom = denom2.clamp_min(1e-12).sqrt()
+        ncc = (cross / denom).clamp(-1.0, 1.0)
+        ncc = torch.where(degenerate, torch.zeros_like(ncc), ncc).squeeze(0)
+        tp = tp.squeeze(0)
+    ncc = ncc.cpu().numpy()
+    tp = tp.cpu().numpy()
+    for i, (ch, w, ink_mass) in enumerate(zip(gpu["v_char"], gpu["v_w"], gpu["v_ink"])):
+        if w > crop_w:
+            continue
+        valid = crop_w - w + 1
+        yield ch, w, ink_mass, ncc[i, :, :valid], tp[i, :, :valid]
+
+
+# ---------------------------------------------------------------------------
 # Search + DP decode
 # ---------------------------------------------------------------------------
 
@@ -311,7 +478,7 @@ class Decode:
         self.min_margin, self.min_score, self.mean_score = min_margin, min_score, mean_score
 
 
-def decode_field(crop_bgr: np.ndarray, polarity: str, scaled: dict, glyph_h: int):
+def decode_field(crop_bgr: np.ndarray, polarity: str, scaled: dict, glyph_h: int, gpu: dict = None):
     mask = calib.field_mask(crop_bgr, polarity)
     ext = ink_extent(mask)
     if ext is None:
@@ -339,24 +506,33 @@ def decode_field(crop_bgr: np.ndarray, polarity: str, scaled: dict, glyph_h: int
     NEG = -1e18
     v_char, v_w, v_score, v_ncc = [], [], [], []
     best_ncc = {}
-    for ch, variants in scaled.items():
-        for w, tmpl, ink_mass in variants:
-            if w > crop_w:
-                continue
-            ncc_map = cv2.matchTemplate(gband, tmpl, cv2.TM_CCOEFF_NORMED)
-            tp_map = cv2.matchTemplate(mband, tmpl, cv2.TM_CCORR)
-            # Pick the row by correlation, then read the overlap at that SAME
-            # row -- taking each maximum independently would score a
-            # placement that never existed.
-            rows = ncc_map.argmax(axis=0)
-            ncc = ncc_map[rows, np.arange(ncc_map.shape[1])]
-            tp = tp_map[rows, np.arange(tp_map.shape[1])]
-            sc = np.full(crop_w, NEG, dtype=np.float64)
-            sc[:ncc.shape[0]] = ncc * ink_mass - GAMMA * (ink_mass - tp)
-            nc = np.full(crop_w, -2.0, dtype=np.float64)
-            nc[:ncc.shape[0]] = ncc
-            v_char.append(ch); v_w.append(w); v_score.append(sc); v_ncc.append(nc)
-            best_ncc[ch] = nc if ch not in best_ncc else np.maximum(best_ncc[ch], nc)
+
+    def accumulate(ch, w, ink_mass, ncc_map, tp_map):
+        # Pick the row by correlation, then read the overlap at that SAME
+        # row -- taking each maximum independently would score a placement
+        # that never existed. Shared by both the GPU and CPU paths below so
+        # they can't silently drift apart on the scoring formula.
+        rows = ncc_map.argmax(axis=0)
+        ncc = ncc_map[rows, np.arange(ncc_map.shape[1])]
+        tp = tp_map[rows, np.arange(tp_map.shape[1])]
+        sc = np.full(crop_w, NEG, dtype=np.float64)
+        sc[:ncc.shape[0]] = ncc * ink_mass - GAMMA * (ink_mass - tp)
+        nc = np.full(crop_w, -2.0, dtype=np.float64)
+        nc[:ncc.shape[0]] = ncc
+        v_char.append(ch); v_w.append(w); v_score.append(sc); v_ncc.append(nc)
+        best_ncc[ch] = nc if ch not in best_ncc else np.maximum(best_ncc[ch], nc)
+
+    if gpu is not None:
+        for ch, w, ink_mass, ncc_map, tp_map in gpu_correlate(gpu, gband, mband, crop_w):
+            accumulate(ch, w, ink_mass, ncc_map, tp_map)
+    else:
+        for ch, variants in scaled.items():
+            for w, tmpl, ink_mass in variants:
+                if w > crop_w:
+                    continue
+                ncc_map = cv2.matchTemplate(gband, tmpl, cv2.TM_CCOEFF_NORMED)
+                tp_map = cv2.matchTemplate(mband, tmpl, cv2.TM_CCORR)
+                accumulate(ch, w, ink_mass, ncc_map, tp_map)
     if not v_char:
         return None
     V_W = np.asarray(v_w, dtype=np.int32)
@@ -568,10 +744,9 @@ def extract_match(match: str, bank: dict) -> dict:
             dropped.append({"id": r["id"], "box": r["box"], "reason": why})
             continue
         cfg["box"] = r["box"]
-        cfg["bg_bgr"] = r.get("bg_bgr")
-        cfg["bg_std"] = r.get("bg_std")
         cfg["scaled"] = scale_bank(bank, cfg["glyph_h"], cfg["exemplar"])
         cfg["chars"] = "".join(sorted(cfg["scaled"]))
+        cfg["gpu"] = build_gpu_bank(cfg["scaled"])
         kept[r["id"]] = cfg
     print(f"[triage] {match}: {len(kept)} regions kept, {len(dropped)} dropped "
           f"of {len(regions)}", file=sys.stderr)
@@ -614,7 +789,7 @@ def extract_match(match: str, bank: dict) -> dict:
                 if seen >= VOTE_ALWAYS_FIRST and seen % VOTE_STRIDE:
                     st["prev"] = crop
                     continue
-                dec = decode_field(crop, cfg["polarity"], cfg["scaled"], cfg["glyph_h"])
+                dec = decode_field(crop, cfg["polarity"], cfg["scaled"], cfg["glyph_h"], gpu=cfg["gpu"])
                 n_decoded += 1
                 if dec is not None:
                     run["votes"].append(dec.raw)
@@ -634,7 +809,7 @@ def extract_match(match: str, bank: dict) -> dict:
     out_regions = {}
     for rid, c in kept.items():
         out_regions[rid] = {"box": c["box"], "polarity": c["polarity"], "glyph_h": c["glyph_h"],
-                            "bg_bgr": c["bg_bgr"], "bg_std": c["bg_std"], "chars": c["chars"],
+                            "chars": c["chars"],
                             "calib_margin": round(c["margin"], 4), "n_runs": n_runs.get(rid, 0)}
     return {"match": match, "fps": fps, "n_frames": total, "n_decodes": n_decoded,
             "regions": out_regions, "dropped": dropped, "events": events}
@@ -644,13 +819,22 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--match", required=True)
     ap.add_argument("--save", action="store_true")
+    ap.add_argument("--cpu", action="store_true",
+                    help="force the original cv2-only decode path even if a CUDA GPU is available "
+                         "(see module docstring's 'GPU decode' section)")
     args = ap.parse_args()
+
+    if args.cpu:
+        global GPU_DEVICE
+        GPU_DEVICE = None
 
     bank = load_templates()
     if not bank:
         sys.exit(f"[error] no templates under {TEMPLATES_DIR} -- run 04_build_templates.py first")
     print(f"[bank] {len(bank)} characters, exemplars: " +
           ", ".join(f"{c}x{len(v)}" for c, v in sorted(bank.items())), file=sys.stderr)
+    print(f"[gpu] {'CUDA (' + torch.cuda.get_device_name(0) + ')' if GPU_DEVICE else 'disabled -- CPU decode path'}",
+          file=sys.stderr)
 
     result = extract_match(args.match, bank)
     print(f"[extract] {args.match}: {len(result['events'])} runs from "

@@ -36,10 +36,14 @@ file was cut back to the part it can actually measure.
 
 The split, concretely: this file may use pixel colour as a SIMILARITY signal
 (two pockets sit on the same chip, so they are one field) but never as a
-NAME (this chip is blue, therefore blue alliance). The first is geometry and
-belongs here; the second is a season-specific convention and belongs in 06.
-Dropping the naming also drops easyocr/torch from this file -- the whole
-pipeline is now OCR-free apart from 03_calibrate.py's template harvesting.
+NAME (this chip is blue, therefore blue alliance) -- naming is a
+season-specific convention and belongs in 06. Colour-as-similarity stays
+entirely internal to the merge step (merge_pockets/background_stats) and is
+not exported: 06_identify.py has its own frame access now and samples
+colour itself, from however many frames it needs, when it decides what a
+region means. Dropping the naming also drops easyocr/torch from this file
+-- the whole pipeline is now OCR-free apart from 03_calibrate.py's template
+harvesting.
 
 Algorithm
 ---------
@@ -60,7 +64,8 @@ Algorithm
    Two pockets merge when they are row-aligned, close horizontally, and sit
    on a background of the same colour.
 4. Emit every surviving region with what was measured about it: box,
-   background colour, background uniformity, activity. No interpretation.
+   n_pockets it was merged from, activity. No colour, no interpretation --
+   colour was only ever needed to decide the merge itself (step 3).
 
 MERGE_MAX_GAP_FRAC: the constant that cost two matches their clock
 --------------------------------------------------------------------
@@ -87,8 +92,7 @@ data/<match>_regions.json:
 {
   "match": "match1", "img_w":.., "img_h":.., "fps":..,
   "regions": [{"id": "r00", "box": [x0,y0,x1,y1], "area_frac":..,
-               "bg_bgr": [b,g,r], "bg_std":.., "n_pockets":..,
-               "activity":..}, ...],
+               "n_pockets":.., "activity":..}, ...],
   "pockets": [ ... pre-merge, for --viz debugging ... ]
 }
 Regions are ordered left-to-right, top-to-bottom, and `id` is positional
@@ -273,9 +277,11 @@ def find_pockets(range_img: np.ndarray, static_threshold: float,
 
 def background_stats(frame_bgr: np.ndarray, box: list, margin: int = BG_RING_MARGIN):
     """Median BGR and per-channel spread of the ring just outside `box`.
-    Returns (median_bgr, std) or (None, None). The spread is reported so
-    06_identify.py can tell a solid graphic chip from live camera content
-    without this file having to decide."""
+    Returns (median_bgr, std) or (None, None). Used only internally by
+    merge_pockets, as a SIMILARITY signal for deciding which pockets belong
+    to the same chip -- not exported. 06_identify.py now has its own frame
+    access and samples colour itself when it needs to decide what a region
+    means."""
     h, w = frame_bgr.shape[:2]
     x0, y0, x1, y1 = box
     ox0, oy0 = max(0, x0 - margin), max(0, y0 - margin)
@@ -305,9 +311,8 @@ def merge_pockets(pockets: list, ref_bgr: np.ndarray, frame_area: int) -> list:
     what keeps a score chip from merging with the clock chip beside it when
     the two happen to fall within the gap."""
     for p in pockets:
-        med, std = background_stats(ref_bgr, p["box"])
+        med, _ = background_stats(ref_bgr, p["box"])
         p["_bg"] = med
-        p["_bg_std"] = std
 
     order = sorted(range(len(pockets)), key=lambda i: pockets[i]["box"][0])
     used = [False] * len(pockets)
@@ -338,12 +343,9 @@ def merge_pockets(pockets: list, ref_bgr: np.ndarray, frame_area: int) -> list:
                     used[oj] = True
                     grew = True
         area = (x1 - x0) * (y1 - y0)
-        med, std = background_stats(ref_bgr, [x0, y0, x1, y1])
         regions.append({
             "box": [int(x0), int(y0), int(x1), int(y1)],
             "area_frac": round(area / frame_area, 6),
-            "bg_bgr": [int(v) for v in med] if med is not None else None,
-            "bg_std": round(std, 2) if std is not None else None,
             "n_pockets": len(members),
             "activity": round(float(np.mean([pockets[i]["frac"] for i in members])), 6),
         })
@@ -412,8 +414,8 @@ def main():
     result, ref, range_img, pockets = detect(video_path)
     for r in result["regions"]:
         x0, y0, x1, y1 = r["box"]
-        print(f"  {r['id']}  {x1-x0:>4}x{y1-y0:<4} @({x0},{y0})  bg={r['bg_bgr']} "
-              f"bg_std={r['bg_std']}  pockets={r['n_pockets']}", file=sys.stderr)
+        print(f"  {r['id']}  {x1-x0:>4}x{y1-y0:<4} @({x0},{y0})  "
+              f"pockets={r['n_pockets']}", file=sys.stderr)
 
     if args.viz:
         vis = visualize(ref, range_img, pockets, result["regions"])
