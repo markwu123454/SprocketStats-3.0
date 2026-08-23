@@ -9,18 +9,25 @@ Usage:
   python 02_train.py
   python 02_train.py --resume       # resume from last checkpoint
   python 02_train.py --model yolo26n.pt  # override model size
+  python 02_train.py --cutmix 0.15 --translate 0.2  # occlusion-robustness augmentation
 """
 import argparse, pathlib, sys
 import yaml
 
-ROOT        = pathlib.Path(__file__).parent.parent
-CFG_PATH    = ROOT / "config.yaml"
-CFG = yaml.safe_load(open(CFG_PATH))
-DATASET_YAML = ROOT / CFG["paths"]["dataset_yaml"]
-RUNS_DIR     = ROOT / CFG["paths"]["runs_dir"]
+ROOT = pathlib.Path(__file__).parent.parent
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--config", default="config.yaml",
+                    help="config file under the yolo/ root (default: %(default)s)")
+    # parse --config first so its value is known before the rest of the
+    # config-dependent defaults (--model) are built
+    cfg_name = ap.parse_known_args()[0].config
+    CFG_PATH = ROOT / cfg_name
+    CFG = yaml.safe_load(open(CFG_PATH))
+    DATASET_YAML = ROOT / CFG["paths"]["dataset_yaml"]
+    RUNS_DIR     = ROOT / CFG["paths"]["runs_dir"]
+
     _default_model = CFG["train"]["model"]
     _default_model = str(ROOT / _default_model) if (ROOT / _default_model).exists() else _default_model
     ap.add_argument("--model",  default=_default_model,
@@ -29,6 +36,15 @@ def main():
                     help="run directory name under runs_dir (default: robot_detection)")
     ap.add_argument("--resume", action="store_true",
                     help="resume from last.pt in the run directory")
+    ap.add_argument("--epochs", type=int, default=None,
+                    help="override config.yaml train.epochs")
+    ap.add_argument("--cutmix", type=float, default=0.0,
+                    help="CutMix probability — pastes a rectangular patch from another "
+                         "training image, the built-in stand-in for occlusion since "
+                         "copy_paste requires segmentation masks we don't have")
+    ap.add_argument("--translate", type=float, default=0.1,
+                    help="translation augmentation fraction — raising this pushes more "
+                         "boxes toward/past frame edges, simulating frame-boundary crops")
     args = ap.parse_args()
 
     try:
@@ -53,7 +69,7 @@ def main():
         model = YOLO(args.model)
         model.train(
             data=str(DATASET_YAML),
-            epochs=t["epochs"],
+            epochs=args.epochs if args.epochs is not None else t["epochs"],
             imgsz=t["imgsz"],
             batch=t["batch"],
             device=t["device"],
@@ -61,6 +77,8 @@ def main():
             project=str(RUNS_DIR),
             name=args.name,
             exist_ok=True,
+            cutmix=args.cutmix,
+            translate=args.translate,
         )
 
     print("[done] training complete")

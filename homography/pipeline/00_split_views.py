@@ -55,7 +55,7 @@ Usage
 Install: pip install opencv-python requests numpy
 """
 
-import argparse, json, sys, pathlib
+import argparse, json, math, sys, pathlib
 import numpy as np
 import cv2
 import requests
@@ -364,6 +364,40 @@ def _segments_from_bands(bands: list[tuple[int, int]], length: int) -> list[tupl
     return segs
 
 
+def _merge_undersized_segments(segs: list[tuple[int, int]], area_frac,
+                               min_fraction: float) -> list[tuple[int, int]]:
+    """
+    A column/row split can fragment one real camera view into several
+    slivers, each too small on its own to pass min_fraction even though the
+    view they came from wasn't. Measured on match1: a crowd-cam panel with
+    a momentarily-still patch (someone standing still for a few sampled
+    frames) reads as a spurious internal separator and splits the panel
+    into 3 pieces, none clearing 0.08 alone though the real panel is ~0.09.
+    Before dropping an undersized segment, check whether it and its
+    undersized neighbors combine into something that does clear the
+    threshold, and if so keep them merged into one spanning segment instead
+    of silently losing the view. A run that still doesn't clear combined is
+    genuine noise and is dropped, same as before. A segment that already
+    passes alone is never absorbed into a neighboring merge.
+    """
+    merged = []
+    i, n = 0, len(segs)
+    while i < n:
+        s0, e0 = segs[i]
+        if area_frac(s0, e0) >= min_fraction:
+            merged.append((s0, e0))
+            i += 1
+            continue
+        j = i + 1
+        while j < n and area_frac(*segs[j]) < min_fraction:
+            j += 1
+        span_e = segs[j - 1][1]
+        if area_frac(s0, span_e) >= min_fraction:
+            merged.append((s0, span_e))
+        i = j
+    return merged
+
+
 def find_camera_rects(range_img: np.ndarray,
                       min_fraction: float = MIN_VIEW_FRACTION,
                       frames_gray: list[np.ndarray] | None = None) -> list[dict]:
@@ -375,7 +409,9 @@ def find_camera_rects(range_img: np.ndarray,
        separator band(s) (troughs) splitting the frame into row strips.
     2. For each row strip, independently compute column-wise variance ->
        find vertical separator band(s) the same way.
-    3. Return bounding rects for all resulting camera-view regions.
+    3. Return bounding rects for all resulting camera-view regions --
+       merging undersized column segments back together first where their
+       combined area recovers a real view (see _merge_undersized_segments).
 
     `frames_gray` is accepted for call-site compatibility but unused here --
     band detection needs only the accumulated range image.
@@ -402,13 +438,13 @@ def find_camera_rects(range_img: np.ndarray,
         col_var  = np.var(strip, axis=0)
         v_bands  = _local_minima_bands(col_var)
         col_segs = _segments_from_bands(v_bands, w)
+        col_segs = _merge_undersized_segments(
+            col_segs, lambda s, e: (e - s) * (y1 - y0) / total, min_fraction)
 
         for x0, x1 in col_segs:
             area = (x1 - x0) * (y1 - y0)
-            frac = area / total
-            if frac >= min_fraction:
-                rects.append({"box": [x0, y0, x1, y1],
-                               "area": area, "fraction": round(frac, 3)})
+            rects.append({"box": [x0, y0, x1, y1],
+                           "area": area, "fraction": round(area / total, 3)})
 
     rects.sort(key=lambda r: -r["area"])
     return rects
@@ -911,6 +947,236 @@ def label_views(rects: list[dict], img_w: int, img_h: int) -> list[dict]:
 def named_crops(views: list[dict]) -> dict:
     """Flatten views list into a {name: [x0,y0,x1,y1]} dict."""
     return {v["name"]: v["box"] for v in views}
+
+
+# ---------------------------------------------------------------------------
+# Segment-aware detection -- layout can change mid-video
+# ---------------------------------------------------------------------------
+# find_camera_rects assumes one static layout for the whole video, detected
+# from a single sampled window. Some districts change camera layout mid-match
+# (2025 FIRST broadcasts routinely do) -- a single global detection either
+# catches whichever layout happened to be sampled, or, if the sample straddles
+# the change, blurs both together in one range image and finds neither
+# cleanly. detect_view_segments instead samples several windows spread across
+# the whole video, detects a layout independently in each, and bisects
+# between any two adjacent windows whose layouts disagree to localize the
+# actual change time -- so the output is a per-time-range set of views rather
+# than one global set.
+
+# MAX_SECTION_SEC, not a fixed section count: a fixed count of sections over
+# the whole video lets a short mid-video event land entirely inside one
+# section and blend with whatever's on either side of it in that section's
+# sample, producing nothing usable. Confirmed on match3 -- a real 3rd
+# bottom-camera panel present for only ~20s vanished inside a single ~18s-
+# wide section when N_SECTIONS was fixed at 10. Sizing sections in absolute
+# time instead means section count scales with how much video there is to
+# cover, so a short event still gets several sections to itself.
+MAX_SECTION_SEC     = 8.0
+MIN_SECTIONS        = 6      # floor, so a short video/window still gets more than one look
+SECTION_FRAMES      = 20     # frames sampled per window for detection
+MIN_WINDOW_SEC      = 15.0   # floor on wall-clock time a single detection window spans -- see
+                              # _window_views; independent of MAX_SECTION_SEC's probe spacing
+SECTION_START_FRAC  = 0.02   # fallback margin when detect_view_segments isn't given an explicit window
+SECTION_END_FRAC    = 0.98
+VIEW_IOU_TOL        = 0.5    # matched-view IoU above this counts as "same layout". Measured on
+                              # match3's genuinely-static 2-bottom-cam stretch: same-layout box
+                              # jitter between adjacent probes ranged down to 0.547 IoU (edge
+                              # coordinates wobble by tens to a few hundred px between samples),
+                              # so 0.85 was misreading ordinary noise as a layout change. A
+                              # real layout change is usually also a rect-COUNT change, which
+                              # _views_match rejects regardless of this threshold -- IoU only
+                              # decides same-count-different-position cases.
+BISECT_MIN_GAP_FRAC = 0.01   # stop bisecting a boundary once the window is this small
+MIN_SEGMENT_FRAC    = 0.03   # segments shorter than this fraction of the searched span are noise -- merge into a neighbor
+
+
+def _iou(a: list[int], b: list[int]) -> float:
+    ax0, ay0, ax1, ay1 = a
+    bx0, by0, bx1, by1 = b
+    ix0, iy0 = max(ax0, bx0), max(ay0, by0)
+    ix1, iy1 = min(ax1, bx1), min(ay1, by1)
+    iw, ih = max(0, ix1 - ix0), max(0, iy1 - iy0)
+    inter = iw * ih
+    if inter == 0:
+        return 0.0
+    union = (ax1 - ax0) * (ay1 - ay0) + (bx1 - bx0) * (by1 - by0) - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _views_match(a: dict | None, b: dict | None, iou_tol: float = VIEW_IOU_TOL) -> bool:
+    """
+    True if two {view_name: box} detections describe the same layout.
+    Matched by best-IoU box pairing, not by name -- label_views' names are
+    just reading-order positions, only meaningful within one call.
+    """
+    if a is None or b is None:
+        return a is b
+    if len(a) != len(b):
+        return False
+    remaining = list(b.values())
+    for abox in a.values():
+        best_i, best_iou = -1, 0.0
+        for i, bbox in enumerate(remaining):
+            iou = _iou(abox, bbox)
+            if iou > best_iou:
+                best_iou, best_i = iou, i
+        if best_i == -1 or best_iou < iou_tol:
+            return False
+        remaining.pop(best_i)
+    return True
+
+
+def _window_views(video_path: str, f0: float, f1: float, duration: float,
+                  n: int = SECTION_FRAMES) -> dict | None:
+    """
+    Detect camera views within time-fraction window [f0, f1) of the video,
+    widened around its center to at least MIN_WINDOW_SEC of wall-clock time
+    if narrower -- accumulate_range's signal comes from real robot/object
+    motion, which needs TIME to happen, not just more sampled frames; a
+    window narrower than that starves the activity map (weak/near-zero
+    range image) even with SECTION_FRAMES frames in it, and reads as "no
+    split" for reasons that have nothing to do with the actual layout. This
+    can make widened probes overlap their neighbors when the probe spacing
+    (MAX_SECTION_SEC, or a bisection step near BISECT_MIN_GAP_FRAC) is
+    narrower than MIN_WINDOW_SEC -- that only affects how much video an
+    individual probe sees, not how finely spaced probes (and therefore
+    boundary localization) are.
+
+    None if fewer than 2 rectangles survive -- a single detected rectangle
+    isn't a "split" worth recording, just the whole frame.
+    """
+    if f1 <= f0 or duration <= 0:
+        return None
+    if (f1 - f0) * duration < MIN_WINDOW_SEC:
+        center = (f0 + f1) / 2
+        half = (MIN_WINDOW_SEC / duration) / 2
+        f0, f1 = max(0.0, center - half), min(1.0, center + half)
+    try:
+        grays, bgrs, _ = sample_video_frames(video_path, n=n, start_frac=f0, end_frac=f1)
+    except Exception:
+        return None
+    if not grays:
+        return None
+    img_h, img_w = grays[0].shape
+    range_img = accumulate_range(grays)
+    rects = find_camera_rects(range_img)
+    rects, _ = exclude_cg_regions(rects, bgrs)
+    if len(rects) < 2:
+        return None
+    views = label_views(rects, img_w, img_h)
+    return {v["name"]: v["box"] for v in views}
+
+
+def _find_boundary(video_path: str, f_lo: float, views_lo: dict | None,
+                   f_hi: float, views_hi: dict | None, duration: float,
+                   min_gap: float = BISECT_MIN_GAP_FRAC) -> float:
+    """
+    Binary-search the layout-change instant between f_lo (detects as
+    views_lo) and f_hi (known to differ). At each midpoint, detect a window
+    (see MIN_WINDOW_SEC in _window_views) and classify it against whichever
+    of the two known layouts it's closer to; an inconclusive midpoint
+    (matches neither, or nothing found -- it landed mid-transition) is
+    folded into the "hi" side so the bisection still terminates, placing
+    the boundary conservatively early rather than left unresolved. Returns
+    the boundary fraction.
+    """
+    while f_hi - f_lo > min_gap:
+        f_mid = (f_lo + f_hi) / 2
+        mid = _window_views(video_path, f_mid, min(f_mid + min_gap, f_hi), duration)
+        if _views_match(mid, views_lo):
+            f_lo, views_lo = f_mid, mid
+        else:
+            f_hi, views_hi = f_mid, mid
+    return f_hi
+
+
+def _merge_short_segments(segments: list[dict], min_frac: float = MIN_SEGMENT_FRAC) -> list[dict]:
+    """Fold segments shorter than min_frac into a neighbor -- a detection
+    blip mid-video shouldn't produce its own (probably-wrong) output segment."""
+    i = 0
+    while len(segments) > 1 and i < len(segments):
+        seg = segments[i]
+        if seg["t1"] - seg["t0"] >= min_frac:
+            i += 1
+            continue
+        if i > 0:
+            segments[i - 1]["t1"] = seg["t1"]
+        else:
+            segments[i + 1]["t0"] = seg["t0"]
+        segments.pop(i)
+    return segments
+
+
+def _video_duration_sec(video_path: str) -> float:
+    cap = cv2.VideoCapture(video_path)
+    frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    cap.release()
+    return frames / fps if fps > 0 else 0.0
+
+
+def detect_view_segments(video_path: str, start_sec: float | None = None,
+                         end_sec: float | None = None,
+                         max_section_sec: float = MAX_SECTION_SEC) -> dict:
+    """
+    Detect camera-view rectangles across the whole video, allowing the
+    layout to change mid-match (see module note above).
+
+    start_sec/end_sec optionally bound detection to a known-active window
+    (e.g. broadcast/'s clock-derived match window, see 03_run.py) instead
+    of the whole video -- this isn't just a speed optimization, it also
+    keeps pregame/postgame CG slates out of the sampled range entirely,
+    which a fraction-of-whole-video margin can't guarantee for an
+    arbitrarily-long intro/outro. Falls back to SECTION_START_FRAC/
+    SECTION_END_FRAC of the whole video when not given.
+
+    Section count scales with the covered duration (max_section_sec)
+    rather than being fixed -- see the module note above MAX_SECTION_SEC.
+
+    Returns {"split": bool, "segments": [{"t0": frac, "t1": frac,
+    "views": {name: box}}, ...]} where t0/t1 are fractions of total video
+    duration (regardless of start_sec/end_sec). `split` is False (empty
+    segments) only if no sampled window anywhere found a genuine
+    multi-view split; the caller should fall back to treating the whole
+    video as one unsplit view in that case. A time range with no
+    detectable split (e.g. a borderless or PIP-only stretch) simply has no
+    covering segment -- it isn't forced into either neighbor's layout.
+    """
+    duration = _video_duration_sec(video_path)
+    if duration <= 0:
+        return {"split": False, "segments": []}
+
+    t0 = start_sec if start_sec is not None else duration * SECTION_START_FRAC
+    t1 = end_sec if end_sec is not None else duration * SECTION_END_FRAC
+    if t1 <= t0:
+        return {"split": False, "segments": []}
+    f0, f1 = t0 / duration, t1 / duration
+
+    n_sections = max(MIN_SECTIONS, math.ceil((t1 - t0) / max_section_sec))
+    bounds = [f0 + (f1 - f0) * i / n_sections for i in range(n_sections + 1)]
+    section_views = [_window_views(video_path, bounds[i], bounds[i + 1], duration)
+                     for i in range(n_sections)]
+
+    if all(v is None for v in section_views):
+        return {"split": False, "segments": []}
+
+    segments = []
+    seg_start = bounds[0]
+    cur = section_views[0]
+    for i in range(1, n_sections):
+        nxt = section_views[i]
+        if _views_match(cur, nxt):
+            continue
+        boundary = _find_boundary(video_path, bounds[i - 1], cur, bounds[i], nxt, duration)
+        if cur is not None:
+            segments.append({"t0": seg_start, "t1": boundary, "views": cur})
+        seg_start = boundary
+        cur = nxt
+    if cur is not None:
+        segments.append({"t0": seg_start, "t1": bounds[-1], "views": cur})
+
+    segments = _merge_short_segments(segments, min_frac=MIN_SEGMENT_FRAC * (f1 - f0))
+    return {"split": bool(segments), "segments": segments}
 
 
 # ---------------------------------------------------------------------------
