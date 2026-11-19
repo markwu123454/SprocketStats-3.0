@@ -1,6 +1,6 @@
 # Camera Pose & Intrinsics Calibration Research
 
-Once `pipeline/01_detect_tags.py` has decoded AprilTags per view, the pipeline
+Once `run/detect_tags.py` has decoded AprilTags per view, the pipeline
 needs each camera's pose (position + orientation) *and* intrinsics (focal
 length, principal point, lens distortion) to project between pixels and field
 coordinates. There's no controlled calibration target anywhere in this
@@ -38,9 +38,9 @@ position, not a converted physical value (it could show "k1: 0" while the
 real k1 was -0.3). Produced a trustworthy seed pose, but doesn't scale: a
 human in the loop per view per video.
 
-**Superseded by**: `pipeline/03_solve_pose.py` solving automatically once
+**Superseded by**: `run/solve_pose.py` solving automatically once
 intrinsics are decent (see #6), plus a *new* manual tool this round,
-`viz/09_calibrate_ui.py` — real browser `<input type="range">` sliders with
+`run/calibrate_ui.py` — real browser `<input type="range">` sliders with
 the actual value always displayed next to them, so the exact failure mode
 that ruled out sliders here doesn't apply to a page you control the DOM of.
 
@@ -91,7 +91,7 @@ Assume a horizontal FOV (default 70°), zero distortion, principal point at
 the exact crop center — no fitting from the video at all, just
 `f = (w/2) / tan(fov/2)`.
 
-**This was the production default** feeding `pipeline/03_solve_pose.py` until
+**This was the production default** feeding `run/solve_pose.py` until
 this round of work, and its flaw is what actually caused the "doesn't line up
 anywhere" symptom that kicked off this whole investigation:
 `data/calibration/match_intrinsics.json` had the *identical* `focal_px:
@@ -99,11 +99,11 @@ anywhere" symptom that kicked off this whole investigation:
 ~940px wide) — physically impossible for independent crops, because
 `--focal-px 1004` had been passed once and reused, never fit per-view.
 
-### 6. 1-D ladder search ✓ **adopted** — now `pipeline/03_solve_pose.py`'s intrinsics search (originally a separate `pipeline/02_search_focal.py`, merged in since the two were never really separable — see that file's module docstring)
+### 6. 1-D ladder search ✓ **adopted** — now `run/solve_pose.py`'s intrinsics search (originally a separate `pipeline/02_search_focal.py`, merged in since the two were never really separable — see that file's module docstring)
 
 Start from the simplest model that could possibly be right — `fx=fy=f`,
 `cx=W/2, cy=H/2`, `dist=0`, one free parameter — and search it with a real
-objective: hand `pipeline/03_solve_pose.py`'s actual `solve_view()` a
+objective: hand `run/solve_pose.py`'s actual `solve_view()` a
 candidate K and use its **all-correspondences RMS** (not the RANSAC
 inlier-only number, which is gameable — a wrong-by-2.5× focal length was
 confirmed faking a low residual by having RANSAC quietly drop half the
@@ -117,7 +117,7 @@ count, and only after checking the addition is real signal:
 
 - **`+ cx, cy`** once a view clears `MIN_POINTS_FOR_PRINCIPAL_POINT` (20).
   Motivated physically, not just numerically: `main` is a Y-only crop of a
-  larger broadcast frame (`pipeline/00_split_views.py`), so its true
+  larger broadcast frame (`broadcast/run/split_views.py`), so its true
   principal point has no reason to sit at the crop's own geometric center.
   Confirmed on `match.mp4`: `cy` moved +332px (356→688 on a 712px-tall crop,
   RMS 8.14→4.36px) while `cx` stayed at *exactly* the crop center (960.0,
@@ -153,8 +153,8 @@ and was fine. Comparing detected vs. projected pixel coordinates directly
 showed a clean top/bottom flip: corners AT3 reports first are consistently
 the *bottom* of the tag, not the top. Reversing the local array's order
 fixed it outright (per-corner error on the affected tags: ~20px → ~1px).
-Fixed in `pipeline/03_solve_pose.py`, `viz/03_overlay.py`,
-`viz/09_calibrate_ui.py` — all three had their own copy of this geometry
+Fixed in `run/solve_pose.py`, `debug/overlay_field.py`,
+`run/calibrate_ui.py` — all three had their own copy of this geometry
 (this codebase duplicates small helpers per-file rather than sharing
 imports; see any of those files' `_quat_to_rot`/`tag_corners_field` for the
 established pattern).
@@ -165,7 +165,7 @@ A tag decoded in only 1–2 of 150 sampled frames has no averaging benefit —
 its "mean" position is just that raw detection, full pixel noise and all.
 On `match2.mp4`'s `main` view, two such tags (1 and 2 observations) alone
 were enough to push RMS to 105px; dropping them (same f) brought it to 16px
-before any other fix. `pipeline/03_solve_pose.py` now requires
+before any other fix. `run/solve_pose.py` now requires
 `n_frames_detected >= MIN_FRAME_FRACTION (0.1) * n_frames_sampled` before a
 tag is used in pose-solving at all.
 
@@ -263,13 +263,13 @@ own correspondences.
 ## Current pipeline
 
 ```
-pipeline/00_split_views.py   -> data/profiles/<stem>_layout.json
-pipeline/01_detect_tags.py   -> data/detections/<stem>_tags.json
-pipeline/03_solve_pose.py    -> data/calibration/<stem>_intrinsics.json (fit)
+broadcast/run/split_views.py -> broadcast/data/<stem>_views.json
+run/detect_tags.py   -> data/detections/<stem>_tags.json
+run/solve_pose.py    -> data/calibration/<stem>_intrinsics.json (fit)
                                  data/detections/<stem>_poses.json      (pose)
-viz/03_overlay.py            -> data/overlays/<stem>_<view>_overlay.jpg  (sanity check)
-viz/07_field3d.py            -> viz/field3d.html                        (the visualizer)
-viz/09_calibrate_ui.py       -> manual slider fallback, when a view has too
+debug/overlay_field.py            -> data/overlays/<stem>_<view>_overlay.jpg  (sanity check)
+debug/render_field3d.py            -> debug/field3d.html                        (the visualizer)
+run/calibrate_ui.py       -> manual slider fallback, when a view has too
                                  few points for the automatic ladder to trust
 ```
 
@@ -277,7 +277,7 @@ viz/09_calibrate_ui.py       -> manual slider fallback, when a view has too
 
 ## Remaining known limitations
 
-- **`00_split_views.py` cannot handle a pane layout that changes mid-video.**
+- **`split_views.py` cannot handle a pane layout that changes mid-video.**
   In 2025 the bottom strip is two panes during auto/teleop and three during
   endgame (left / climb camera / right). `match3` defeated the splitter
   entirely: it returned a single full-width 1920×347 bottom strip containing

@@ -14,14 +14,14 @@ label_studio:
   label_red: "Red robot center"
   # A robot you can see but whose alliance you cannot determine (bumpers
   # occluded / out of shot). Pulled into the manifest as cls "unknown" so the
-  # labeling effort is preserved; 02_train.py only consumes it in
+  # labeling effort is preserved; train.py only consumes it in
   # --merge-alliances mode, and drops it otherwise. Never predicted by
-  # 03_predict.py — it exists for humans to assign during labeling.
+  # prelabel.py — it exists for humans to assign during labeling.
   label_unknown: "Unknown robot center"
   # A robot hanging from / supported by a climbing structure rather than
   # resting on the carpet. Its ground point is not reliably estimable, so it is
   # NOT a position label — it records that a robot is present and off the
-  # ground. Excluded from heatmap targets in every mode (see model.py).
+  # ground. Excluded from heatmap targets in every mode (see train/dataset.py).
   label_climbing: "Climbing robot center"
   from_name: "kp"      # <KeyPointLabels name="kp" ...>
   to_name: "image"     # toName="image"
@@ -34,7 +34,7 @@ r2:
   # base64 fileuri, decoding to s3://assets/sprocketstats/<round>/<eventcode>_<match>/frame_*.jpg
   bucket: "assets"
   # Local mirror where images are synced for training.
-  local_image_root: "data/frc/images"
+  local_image_root: "data/images"
 
 classes:
   # Channel index -> alliance. Order is FIXED; heatmap channel 0 is blue.
@@ -69,6 +69,6 @@ train:
   num_workers: 2
 
 paths:
-  work_dir: "data/frc/work"
-  export_dir: "data/frc/exports"
-  checkpoints: "data/frc/checkpoints"
+  work_dir: "data/work"
+  export_dir: "data/exports"
+  checkpoints: "data/checkpoints"

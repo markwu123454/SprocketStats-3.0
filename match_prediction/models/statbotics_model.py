@@ -61,7 +61,7 @@ class StatboticsModel(BaseModel):
 
     def __init__(self):
         if not _STATBOTICS_AVAILABLE:
-            raise ImportError("pip install statbotics")
+            raise ImportError("statbotics not installed — run `uv sync` from the repo root")
         self._client = _sb_lib.Statbotics()
         self._match_cache: dict[str, Optional[dict]] = {}
         self._team_event_cache: dict[tuple[str, str], Optional[dict]] = {}

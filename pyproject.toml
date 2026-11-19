@@ -1,0 +1,123 @@
+# The one place the environment is declared. From the repo root:
+#   uv lock                 # resolve everything below into uv.lock (commit it)
+#   uv sync                 # make .venv match uv.lock exactly, and install the
+#                           # six modules as editable packages
+# `uv sync` is exact: it uninstalls anything not declared here, so a new import
+# belongs in the matching group below, not in an ad-hoc `uv pip install`.
+#
+# Versions are pinned to the ones the pipeline was last run and checked with
+# (2026-11-18). Unpinned entries were not installed at that point, so no version
+# of them has been exercised here yet.
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sprocketstats"
+version = "3.0.0"
+# The venv is uv-managed CPython 3.12; resolving for other versions only adds
+# ways for the CUDA torch / paddlex stack to fail to lock.
+requires-python = "==3.12.*"
+# Used by most of the six modules.
+dependencies = [
+    "numpy==2.3.5",
+    # The only OpenCV build in this environment: paddlex pulls the contrib build
+    # (a superset), and the other builds are overridden out below.
+    "opencv-contrib-python==4.10.0.84",
+    "torch==2.11.0",        # +cu128, from the pytorch-cu128 index below
+    "torchvision==0.26.0",  # +cu128, must match torch
+    "python-dotenv==1.2.4",
+    # Not pinned: the venv had 2.28.1 (2022), and that pin forces
+    # label-studio-sdk back to 1.x, whose API the scripts don't match (see the
+    # hrnet group). The newer version hasn't been run here yet.
+    "requests",
+    "pyyaml==6.0.2",
+    "yt-dlp==2026.10.26",
+]
+
+# One group per module, so each module's extra requirements are visible. All
+# groups install by default (tool.uv.default-groups); they are documentation of
+# who needs what, not optional installs.
+[dependency-groups]
+homography = [
+    "pupil-apriltags==1.0.4.post11",
+    "scipy==1.18.1",
+]
+broadcast = [
+    "scipy==1.18.1",
+    "matplotlib==3.11.2",  # --viz plots in run/detect_phases.py
+    "easyocr==1.7.2",      # train/harvest_digits.py labels harvested glyphs
+]
+hrnet = [
+    "timm==1.0.31",
+    "scipy==1.18.1",
+    "matplotlib==3.11.2",  # debug/ viewers
+    "tqdm==4.66.5",
+    # train/ Label Studio + R2 scripts. They call projects.exports.list/get/
+    # download(id=...), the 2.x signature; 1.x names that argument differently.
+    # Checked against 2.1.5's source, not yet run.
+    "label-studio-sdk>=2.1.5,<3",
+    "boto3",
+]
+yolo = [
+    "ultralytics==8.4.215",
+    "pillow==13.0.0",      # debug/ viewers
+    "tqdm==4.66.5",
+    "label-studio-sdk>=2.1.5,<3",  # same 2.x API as the hrnet group
+    "boto3",
+]
+ocr = [
+    # PaddleOCR runs on its Transformers engine. Do NOT add paddlepaddle.
+    "paddleocr==3.7.0",
+    "paddlex==3.7.2",          # imported directly by run/team_scorer.py
+    "transformers==5.23.0",
+]
+mtmct = [
+    "timm==1.0.31",            # hrnet/run/spotter.py, which run/track_robots.py drives
+    "psutil==7.2.2",           # battery check before long runs
+]
+# action/, better_sampling/, match_prediction/ (outside the six-module structure).
+supporting = [
+    "tqdm==4.66.5",
+    "google-api-python-client",  # better_sampling/fetching_metadata.py (YouTube Data API)
+    "statbotics",                # match_prediction/models/statbotics_model.py
+]
+
+[tool.uv]
+default-groups = "all"
+# CUDA torch wheels only exist for these, so don't try to lock for macOS.
+environments = [
+    "sys_platform == 'win32' and platform_machine == 'AMD64'",
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+# Three packages all ship the same cv2/ directory, and whichever installs last
+# overwrites the others' files: ultralytics requires opencv-python, easyocr
+# requires opencv-python-headless, paddlex requires opencv-contrib-python. The
+# never-true markers drop the first two, leaving contrib, which is a superset of
+# both and the build every module was checked against (cv2 4.10.0).
+#
+# FIRST SYNC ONLY: the venv built before this file still has
+# opencv-python-headless, whose file list is the same cv2/ files contrib now
+# owns. Removing it deletes them, so run the first sync as
+#   uv sync --reinstall-package opencv-contrib-python
+# and check `python -c "import cv2; print(cv2.__version__)"` prints 4.10.0.
+override-dependencies = [
+    "opencv-python; sys_platform == 'never'",
+    "opencv-python-headless; sys_platform == 'never'",
+]
+
+# torch/torchvision from PyTorch's CUDA 12.8 index. `explicit` keeps every other
+# package resolving from PyPI, unlike the old --extra-index-url.
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+
+[tool.setuptools.packages.find]
+include = ["homography*", "broadcast*", "hrnet*", "yolo*", "ocr*", "mtmct*",
+           "better_sampling*"]  # supporting code, but tracking imports its match_data

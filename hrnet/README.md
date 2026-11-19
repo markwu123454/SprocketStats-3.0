@@ -20,26 +20,36 @@ Why not YOLO-pose: it requires each keypoint to be associated with a parent
 robot box. Your points routinely violate that (overlap ambiguity, climbing
 robots whose floor point sits outside their box), so the box paradigm is out.
 
+## Layout
+
+- `run/` — inference: `model.py` (network + peak decoding) and `spotter.py`
+  (checkpoint → robot dots for one frame). Other modules use hrnet only
+  through these.
+- `train/` — the active-learning loop below, plus `dataset.py` (dataset,
+  heatmap targets, loss) and the Label Studio / R2 helpers.
+- `debug/` — interactive viewers for a checkpoint's predictions.
+
+Commands below are run from `hrnet/`.
+
 ## Pipeline
 
 ```
 R2 (150GB images) ──┐
-                    ├─► 01_pull.py ─► exports/manifest.jsonl + local image mirror
+                    ├─► pull_dataset.py ─► exports/manifest.jsonl + local image mirror
 Label Studio ───────┘
                               │
                               ▼
-                        02_train.py ─► checkpoints/best.pt   (season-holdout val)
+                        train.py ─► checkpoints/best.pt   (season-holdout val)
                               │
                               ▼
-                        03_predict.py ─► predictions pushed back to Label Studio
+                        prelabel.py ─► predictions pushed back to Label Studio
                                           (humans then correct → re-export → retrain)
 ```
 
 ### One-time setup
 
 ```bash
-pip install label-studio-sdk boto3 timm scipy opencv-python-headless \
-            torch torchvision pyyaml numpy
+uv sync    # from the repo root; dependencies are in pyproject.toml
 ```
 
 Set environment variables (never commit these):
@@ -56,7 +66,7 @@ Edit `config.yaml` for bucket name, local paths, and `val_season`.
 ### Step 1 — pull labels + images
 
 ```bash
-python scripts/01_pull.py
+python train/pull_dataset.py
 ```
 
 Creates an async export snapshot (required at 112k tasks — the synchronous
@@ -67,7 +77,7 @@ R2 key), and mirrors the referenced images locally.
 ### Step 2 — train
 
 ```bash
-python scripts/02_train.py
+python train/train.py
 ```
 
 Holds out the entire `val_season` for validation (not random frames — 0.5fps
@@ -77,7 +87,7 @@ precision/recall/F1 with one-to-one same-alliance matching. Saves `best.pt`.
 ### Step 3 — predict back into Label Studio
 
 ```bash
-python scripts/03_predict.py --only-unannotated
+python train/prelabel.py --only-unannotated
 ```
 
 Runs the model on unlabeled tasks and writes predictions in the project's exact
@@ -104,7 +114,7 @@ Each round the model gets better, so corrections get faster.
 ## Note on the Label Studio ML backend
 
 The prebuilt Ultralytics ML backend speaks box+associated-keypoint pose, which
-this project does not use, so it does not apply. `03_predict.py` replaces it:
+this project does not use, so it does not apply. `prelabel.py` replaces it:
 it pushes predictions directly through the SDK. If you want live pre-labeling
 (predict-on-import rather than batch), wrap `predict_image()` in a small
 label-studio-ml-backend `predict()` method returning the same result dicts —
