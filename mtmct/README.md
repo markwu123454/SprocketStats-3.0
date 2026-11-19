@@ -34,6 +34,3 @@ work alternates by step: mtmct tracks, ocr reads, mtmct cuts, ocr names.
 the shared track geometry (`DUP_DIST`, `STITCH_GAP`, `frames_index`) from
 `mtmct.run`, so both sides agree on what "the same dot" and "a hand-over" mean.
 No single file imports in a circle.
-
-See `../action/01_train.py` for the manifest format `../action/` expects
-this pipeline to eventually emit.

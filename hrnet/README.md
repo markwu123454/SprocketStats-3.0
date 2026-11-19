@@ -16,10 +16,6 @@ bumper center, colored by alliance (blue / red). Built for season-agnostic use
 - HRNet keeps high-resolution features throughout, which is why it localizes
   small points well across the huge scale range (near-ground to birds-eye).
 
-Why not YOLO-pose: it requires each keypoint to be associated with a parent
-robot box. Your points routinely violate that (overlap ambiguity, climbing
-robots whose floor point sits outside their box), so the box paradigm is out.
-
 ## Layout
 
 - `run/` — inference: `model.py` (network + peak decoding) and `spotter.py`
