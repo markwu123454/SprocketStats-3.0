@@ -14,7 +14,7 @@ import torch
 
 from hrnet.run import model as hr
 
-DEFAULT_CKPT = Path(__file__).resolve().parent.parent / "data" / "frc" / "checkpoints" / "best.pt"
+DEFAULT_CKPT = Path(__file__).resolve().parent.parent / "data" / "checkpoints" / "best.pt"
 
 
 class RobotSpotter:

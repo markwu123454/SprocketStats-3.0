@@ -20,7 +20,7 @@ from PIL import Image, ImageTk
 from dotenv import load_dotenv
 
 ROOT      = pathlib.Path(__file__).parent.parent
-CACHE_DIR = ROOT.parent / "hrnet" / "data" / "frc" / "youtube_cache"
+CACHE_DIR = ROOT.parent / "hrnet" / "data" / "youtube_cache"
 
 _env = ROOT / ".env"
 if not _env.exists():

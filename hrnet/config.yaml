@@ -34,7 +34,7 @@ r2:
   # base64 fileuri, decoding to s3://assets/sprocketstats/<round>/<eventcode>_<match>/frame_*.jpg
   bucket: "assets"
   # Local mirror where images are synced for training.
-  local_image_root: "data/frc/images"
+  local_image_root: "data/images"
 
 classes:
   # Channel index -> alliance. Order is FIXED; heatmap channel 0 is blue.
@@ -69,6 +69,6 @@ train:
   num_workers: 2
 
 paths:
-  work_dir: "data/frc/work"
-  export_dir: "data/frc/exports"
-  checkpoints: "data/frc/checkpoints"
+  work_dir: "data/work"
+  export_dir: "data/exports"
+  checkpoints: "data/checkpoints"

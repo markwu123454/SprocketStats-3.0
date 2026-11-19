@@ -165,8 +165,8 @@ class Viewer:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--manifest", default=str(ROOT / "data/frc/exports/manifest.jsonl"))
-    ap.add_argument("--ckpt", default=str(ROOT / "data/frc/checkpoints/best.pt"))
+    ap.add_argument("--manifest", default=str(ROOT / "data/exports/manifest.jsonl"))
+    ap.add_argument("--ckpt", default=str(ROOT / "data/checkpoints/best.pt"))
     ap.add_argument("--match", default=None, help="only show frames from this match")
     ap.add_argument("--unlabeled-only", action="store_true")
     ap.add_argument("--shuffle", action="store_true")

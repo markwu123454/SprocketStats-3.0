@@ -115,6 +115,29 @@ from any directory. Because the sync is exact, a new dependency goes into
 Run a step by path (`python homography/run/detect_tags.py ...`), as a module
 (`python -m homography.run.detect_tags ...`), or through `uv run`.
 
+### Data
+
+Code goes through git as usual. Each module's `data/` folder (checkpoints,
+templates, layouts, per-match outputs) goes to the `SprocketStats/modelfiles`
+Hugging Face repo through `hf_sync.py`, which never touches git:
+
+```
+python hf_sync.py status              # what push/pull would do; changes nothing
+python hf_sync.py push                # upload files HF doesn't have yet
+python hf_sync.py pull                # download files you don't have yet
+```
+
+Files already on HF are immutable by default: a push never replaces or deletes
+one, and a pull never overwrites a local file that differs. Replacing takes
+`push --override` / `pull --override`, deleting takes
+`hf_sync.py delete <path> --override`. A checkpoint or template that others have
+already pulled and built on shouldn't change under them silently. Overridden
+versions stay in the HF repo's commit history. The rule lives in the script, not
+on the server, so it only holds for changes made through it. The local mirror of
+the R2 training images and the YouTube cache are never synced; both can be
+fetched again from their source. Log in once per machine with
+`.venv\Scripts\hf auth login`.
+
 ---
 
 ## 4. Registration

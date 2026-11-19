@@ -33,7 +33,7 @@ from PIL import Image, ImageTk
 
 ROOT      = pathlib.Path(__file__).parent.parent
 # Shared video cache with hrnet so downloads aren't duplicated
-CACHE_DIR = ROOT.parent / "hrnet" / "data" / "frc" / "youtube_cache"
+CACHE_DIR = ROOT.parent / "hrnet" / "data" / "youtube_cache"
 
 # load credentials for any yt-dlp that needs them (cookies path only, no secrets here)
 from dotenv import load_dotenv

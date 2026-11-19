@@ -24,13 +24,16 @@ yolo/data/
 yolo/runs/
 
 # large / derived data
-hrnet/data/frc/images/
-hrnet/data/frc/youtube_cache/
+hrnet/data/images/
+hrnet/data/youtube_cache/
 hrnet/data/test_ocr/
-hrnet/data/frc/exports/snapshot_*.json
+hrnet/data/exports/snapshot_*.json
 mtmct/data/
 better_sampling/data/
 homography/data/calibration/
 homography/data/detections/
 homography/data/topdown/
 scratch/*.zip
+
+# hf_sync.py pull: huggingface_hub's per-file download bookkeeping in the repo root
+/.cache/

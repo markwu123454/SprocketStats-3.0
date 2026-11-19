@@ -39,7 +39,7 @@ from hrnet.run.model import HeatmapNet, decode_peaks, CLASSES
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 torch.backends.cudnn.benchmark = True  # input size is fixed (heatmap.input_size), so
                                        # cuDNN can pick a fixed-shape conv algo once and reuse it
-CACHE_DIR = ROOT / "data/frc/youtube_cache"
+CACHE_DIR = ROOT / "data/youtube_cache"
 
 COLOR_BGR = {"blue": (255, 120, 0), "red": (0, 0, 255)}
 CH_TO_CLS = {i: c for i, c in enumerate(CLASSES)}
@@ -365,7 +365,7 @@ def main():
     ap.add_argument("--end", type=float, default=None, help="clip end, seconds")
     ap.add_argument("--cookies", default=None,
                     help="path to a cookies.txt (Netscape format) for age/region-gated or private videos")
-    ap.add_argument("--ckpt", default=str(ROOT / "data/frc/checkpoints/best.pt"))
+    ap.add_argument("--ckpt", default=str(ROOT / "data/checkpoints/best.pt"))
     ap.add_argument("--threshold", type=float, default=None,
                     help="override the checkpoint's peak_threshold")
     ap.add_argument("--stride", type=int, default=1,
