@@ -1,7 +1,0 @@
-# uv overrides for ocr/requirements.txt:
-#   uv pip install --python .venv\Scripts\python.exe -r ocr\requirements.txt --override ocr\overrides.txt
-#
-# ultralytics depends on opencv-python, but paddlex already installs opencv-contrib-python.
-# Both write the same cv2/ package, so installing both corrupts cv2. The never-true marker
-# drops opencv-python; ultralytics then uses the contrib build, which is a superset.
-opencv-python; sys_platform == "never"

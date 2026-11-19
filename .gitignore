@@ -9,6 +9,7 @@
 __pycache__/
 *.pyc
 .venv/
+*.egg-info/
 
 # local tooling
 .claude/
@@ -19,14 +20,16 @@ __pycache__/
 
 # generated training output
 runs/
-YOLO/data/
-YOLO/runs/
+yolo/data/
+yolo/runs/
 
 # large / derived data
-HRNet-W32/data/frc/images/
-HRNet-W32/data/frc/youtube_cache/
-HRNet-W32/data/test_ocr/
-HRNet-W32/data/frc/exports/snapshot_*.json
+hrnet/data/frc/images/
+hrnet/data/frc/youtube_cache/
+hrnet/data/test_ocr/
+hrnet/data/frc/exports/snapshot_*.json
+mtmct/data/
+better_sampling/data/
 homography/data/calibration/
 homography/data/detections/
 homography/data/topdown/

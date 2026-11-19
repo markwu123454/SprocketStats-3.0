@@ -81,7 +81,7 @@ to group into regions, fits quads to region boundaries. Fundamentally more
 robust to compression artifacts and blur because it operates on edges rather
 than thresholded pixel values.
 
-**Installation:** `pip install pupil-apriltags`
+**Installation:** `pupil-apriltags`, declared in the root `pyproject.toml` (`uv sync`)
 
 **Parameter search (on broadcast frames where ArUco gets 0–1 decoded):**
 
@@ -124,7 +124,7 @@ and not usable on Windows.
 
 ## Current pipeline
 
-`pipeline/01_detect_tags.py` — AT3 with the tuned parameters above.
+`run/detect_tags.py` — AT3 with the tuned parameters above.
 
 **Output schema** (`data/detections/<stem>_tags.json`):
 
@@ -165,7 +165,7 @@ expose it.
 
 A single AT3 config is a compromise: aggressive `decode_sharpening` recovers
 compressed tags but amplifies real motion blur; a tag too small for the bit
-decoder needs more pixels, not different preprocessing. `pipeline/01_detect_tags.py`
+decoder needs more pixels, not different preprocessing. `run/detect_tags.py`
 now runs each sampled frame through multiple independent (image variant ×
 detector config) combos and merges results per tag_id, keeping the highest
 `decision_margin` on overlap — only ever *adds* detections a single pass would
@@ -192,7 +192,7 @@ one part of the field to constrain a 6-DOF pose + intrinsics fit well — see
 `docs/pose_calibration_research.md` for how the pose-solving side of the
 pipeline handles (and doesn't fully solve) that.
 
-**Removed, superseded by ensemble detection + `pipeline/03_solve_pose.py`'s
+**Removed, superseded by ensemble detection + `run/solve_pose.py`'s
 own corner/centroid handling** (see git history if ever needed — none of this
 survived to justify keeping around):
 - `viz/01_visualize_tags.py`, `viz/05_label_candidates.py` — visualized and
@@ -206,6 +206,6 @@ survived to justify keeping around):
   ArUco's rejected candidates; also dead.
 - `pipeline/03_calibrate.py`'s pose-guided correspondence recovery (project all
   32 tags from a seed pose, match nearest decoded tag geometrically) — folded
-  into a different, more reliable idea: `pipeline/03_solve_pose.py`'s per-tag
+  into a different, more reliable idea: `run/solve_pose.py`'s per-tag
   corner-vs-centroid hybrid gets more *out of the tags actually decoded*
   instead of trying to recover more tag IDs geometrically.

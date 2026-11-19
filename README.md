@@ -62,17 +62,58 @@ afterward.
 
 ## 3. Components
 
+The six pipeline modules:
+
 | Path | What it is |
 |---|---|
-| `homography/` | Camera pose and intrinsics from AprilTags. Splits the broadcast frame into its embedded camera views, detects tags, searches focal length, solves PnP. Produces the image↔field transform everything downstream depends on. |
-| `HRNet-W32/` | HRNet-W32 backbone + 2-channel Gaussian heatmap head (CenterNet-style). One keypoint per robot on the carpet under the bumper center, channel-separated by alliance. Label Studio + Cloudflare R2 active-learning loop. |
-| `YOLO/` | YOLO detectors — robot bounding boxes, and AprilTags. The box is the persistent tracking anchor (see §5). |
-| `mtmct/` | Multi-target multi-camera tracking. Consumes boxes and keypoints, emits persistent per-robot tracks in field coordinates. |
+| `homography/` | Camera pose and intrinsics from AprilTags. Detects tags in each camera view, searches focal length, solves PnP. Produces the image↔field transform everything downstream depends on. |
+| `broadcast/` | Everything specific to how a broadcast is produced: match phases from the audio, the camera feeds embedded in the frame, and the scoreboard overlay read into a timeline of scores, clock and counters. Timing and alliance-level scoring ground truth. |
+| `hrnet/` | HRNet-W32 backbone + 2-channel Gaussian heatmap head (CenterNet-style). One keypoint per robot on the carpet under the bumper center, channel-separated by alliance. Label Studio + Cloudflare R2 active-learning loop. |
+| `yolo/` | YOLO detectors — robot bounding boxes, and AprilTags. The box is the persistent tracking anchor (see §5). |
+| `mtmct/` | Multi-target multi-camera tracking: all of it, including the end-to-end pass that ends with named tracks. Consumes boxes and keypoints, emits persistent per-robot tracks in field coordinates. |
+| `ocr/` | Names each finished track with a team number, or leaves it unknown, from its bumper text scored against the six known teams (see §6, *Team number assignment*). |
+
+Supporting code, outside that structure:
+
+| Path | What it is |
+|---|---|
 | `action/` | Per-robot, per-frame action classification (RNN-family) over finished track sequences. No vision dependency — consumes `(x_frac, y_frac)` only. |
 | `better_sampling/` | TBA metadata and match video acquisition; frame sampling for the labeling corpus. |
 | `match_prediction/` | **Separate pipeline.** Ensemble match-outcome prediction fusing Program A output, Program B output, Statbotics, TBA, and human scouting data. Downstream consumer, not part of the vision stack. |
 | `scratch/` | Experiments. |
 | `runs/` | Ultralytics auto-generated training output. Not a component. |
+
+### Module layout
+
+Each pipeline module is a Python package split the same way:
+
+- `train/` — building datasets and fitting whatever `run/` loads: model
+  checkpoints, digit and icon templates, per-year field layouts. Run
+  occasionally, not per match.
+- `run/` — the per-match steps, plus the code other modules are allowed to use.
+- `debug/` — visualizations, probes, smoke tests and unit tests.
+
+Imports only go one way: `train/` and `debug/` may import `run/`, `run/` never
+imports either, and modules reach each other only through `<module>.run`. That
+keeps the per-match path free of training and plotting dependencies, and it is
+what lets a module's training code or viewers change without risk to the
+pipeline. Files are named for what they do rather than numbered; where steps
+have an order, `run/__init__.py` lists it.
+
+### Environment
+
+The environment is managed with uv, and `pyproject.toml` is the only place
+dependencies are declared: one group per module, pinned to the versions the
+pipeline was last checked with, plus the CUDA torch index and the OpenCV
+override. `uv lock` resolves it into `uv.lock`; `uv sync` makes `.venv` match the
+lock exactly and installs the six modules as editable packages, so they import
+from any directory. Because the sync is exact, a new dependency goes into
+`pyproject.toml` (`uv add --group <module> <pkg>`), not an ad-hoc
+`uv pip install` that the next sync would remove. The comments in
+`pyproject.toml` describe a one-off step the first sync needs.
+
+Run a step by path (`python homography/run/detect_tags.py ...`), as a module
+(`python -m homography.run.detect_tags ...`), or through `uv run`.
 
 ---
 
@@ -81,7 +122,7 @@ afterward.
 The foundation. Everything downstream is expressed in field coordinates, so
 registration quality is the ceiling on every other number the system produces.
 
-**Broadcasts embed 2–3 camera feeds in one frame.** `00_split_views` recovers
+**Broadcasts embed 2–3 camera feeds in one frame.** `broadcast/run/split_views` recovers
 them by per-pixel temporal range: broadcast CG borders and overlays are rendered
 at fixed pixel positions and are bit-identical across frames, while live camera
 content always varies from motion, sensor noise, and compression. Threshold the
@@ -111,7 +152,7 @@ with `fx = fy = f`, principal point fixed at crop center, zero distortion, and
 search the single free parameter against real reprojection RMS. Add the
 principal point only once a view has enough points to support it.
 
-`docs/pose_calibration_research.md` and `docs/tag_detection_research.md` record
+`homography/docs/pose_calibration_research.md` and `homography/docs/tag_detection_research.md` record
 what was tried and why it failed. Read them before proposing a "better" fit.
 
 **Self-validating**: AprilTag reprojection error needs no human labels. Track it

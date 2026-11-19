@@ -1,0 +1,127 @@
+{
+  "year": 2026,
+  "built_from": {
+    "matches": [
+      "match1",
+      "match2",
+      "match4",
+      "match6",
+      "match9",
+      "match10"
+    ],
+    "sample_size": 6,
+    "excluded": {
+      "match7": "Texas district -- does not reliably follow FIRST webcast audio guidelines; cue audio abnormally faint/inconsistent, detection unreliable",
+      "match8": "Texas district; additionally the source video was cut before the match-start cue played (no usable auto_start audio at all)"
+    }
+  },
+  "sequence": [
+    {
+      "name": "auto_start",
+      "file": "start.wav",
+      "gap_from_prev": null
+    },
+    {
+      "name": "auto_end",
+      "file": "end.wav",
+      "gap_from_prev": {
+        "mean": 20.853,
+        "stdev": 0.698,
+        "min": 19.877,
+        "max": 21.701,
+        "manual": false,
+        "n": 6
+      }
+    },
+    {
+      "name": "teleop_start",
+      "file": "resume.wav",
+      "gap_from_prev": {
+        "mean": 3.665,
+        "stdev": 0.614,
+        "min": 2.796,
+        "max": 4.302,
+        "manual": true,
+        "n": 6
+      }
+    },
+    {
+      "name": "shift_change",
+      "file": "shift_change.wav",
+      "gap_from_prev": {
+        "mean": 9.929,
+        "stdev": 0.022,
+        "min": 9.894,
+        "max": 9.951,
+        "manual": false,
+        "n": 6
+      }
+    },
+    {
+      "name": "shift_change",
+      "file": "shift_change.wav",
+      "gap_from_prev": {
+        "mean": 25.016,
+        "stdev": 0.058,
+        "min": 24.965,
+        "max": 25.119,
+        "manual": false,
+        "n": 6
+      }
+    },
+    {
+      "name": "shift_change",
+      "file": "shift_change.wav",
+      "gap_from_prev": {
+        "mean": 25.049,
+        "stdev": 0.125,
+        "min": 24.992,
+        "max": 25.305,
+        "manual": false,
+        "n": 6
+      }
+    },
+    {
+      "name": "shift_change",
+      "file": "shift_change.wav",
+      "gap_from_prev": {
+        "mean": 25.048,
+        "stdev": 0.078,
+        "min": 24.987,
+        "max": 25.164,
+        "manual": false,
+        "n": 6
+      }
+    },
+    {
+      "name": "endgame_start",
+      "file": "warning.wav",
+      "gap_from_prev": {
+        "mean": 25.255,
+        "stdev": 0.148,
+        "min": 25.135,
+        "max": 25.539,
+        "manual": false,
+        "n": 6
+      }
+    },
+    {
+      "name": "match_end",
+      "file": "end.wav",
+      "gap_from_prev": {
+        "mean": 29.76,
+        "stdev": 0.792,
+        "min": 28.227,
+        "max": 30.468,
+        "manual": false,
+        "n": 6
+      }
+    }
+  ],
+  "abort_file": "abort.wav",
+  "notes": [
+    "gap_from_prev.stdev on the auto_end and match_end entries (both adjacent to start.wav/end.wav) is 10-35x higher than every shift_change/resume/warning-adjacent gap, consistently across all 6 source matches. Attributed to start.wav/end.wav having a softer/less distinct correlation peak (localization imprecision), not those specific game transitions genuinely being less exact -- worth revisiting the matched-filter approach for those two clips specifically (e.g. correlating only against the clip's sharpest transient) before trusting this stdev as real timing jitter.",
+    "The gap into teleop_start (from auto_end) is the one manual transition -- field operator starts teleop by hand -- and its mean/stdev here should NOT be used as a tight prior; treat it as unconstrained/wide in any search. Observed range (2.8-4.3s over 6 events) is likely narrower than the true across-event range.",
+    "All other gaps are FMS-automatic and were confirmed exact by direct observation; the profile stdevs reflect measurement precision at n=6, not claimed real-world variance."
+  ]
+}

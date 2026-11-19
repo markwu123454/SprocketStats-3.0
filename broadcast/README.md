@@ -28,28 +28,45 @@ without knowing which robot caused it.
 **Penalty events** — score increases that don't correspond to a known scoring
 action (useful as a foul signal for match prediction).
 
-## Pipeline
+## run/ — per match
 
-`pipeline/01_audio.py` — detect match phase transitions from audio. Extract
-the audio track, run onset/energy analysis to find the characteristic buzzer
-pattern at match start and end. Output timestamps for each phase boundary.
+`run/__init__.py` lists the order. Each step's module docstring explains its
+method and what was tried before it.
 
-`pipeline/02_ocr_score.py` — sample frames at regular intervals, crop the
-CG scoreboard region (position varies by broadcast; may need a per-event
-calibration), run OCR to read alliance scores, and emit a score timeline.
-Output: `data/<match>_scores.jsonl` — `{frame, t_sec, blue_score, red_score}`
+- `detect_phases.py` — matches the official FMS audio cues (`data/field_audio/`)
+  against the broadcast audio, anchored on the strongest cue and checked against
+  the year's cue timing (`data/cue_profiles/<year>.json`).
+  Output: `data/<match>_phases.json`.
+- `split_views.py` — finds the 2–3 camera feeds embedded in the frame (the
+  regions whose pixels keep changing). Output: `data/<match>_views.json`, read
+  by `homography/run/detect_tags.py`.
+- `detect_overlay.py` — finds every overlay region that holds a changing number,
+  by behaviour, without deciding what it is. Output: `data/<match>_regions.json`.
+- `read_overlay.py` — reads every region on every settled frame by template
+  search against the digit bank. Output: `data/<match>_regions_timeline.json`.
+- `identify_fields.py` — decides what each region means (scores, clock,
+  counters) and cuts the timeline to the match window. Output: `data/<match>_match.json`.
+- `layouts.py` — hand-measured per-event layout: the field outline, overlay
+  boxes holding printed digits, and boxes where spotter dots are ignored even
+  inside the field. mtmct uses it to decide which
+  robot dots count, ocr to mask digits before reading bumpers.
+- `field_crops.py` — the ink and change tests that run/ and train/ must agree
+  on (digit glyphs and game-piece icons are matched against templates built
+  with the same thresholds).
 
-`pipeline/03_events.py` — merge audio timestamps and score timeline into a
-unified event stream. Align phase boundaries with score-change events to
-produce the final output.
-Output: `data/<match>_events.json` — `{phases: {auto_start, teleop_start, ...},
-score_events: [{t_sec, alliance, delta, cumulative}]}`
+## train/ — rebuilding what run/ reads
 
-## Viz
+- `harvest_digits.py` → `build_digit_templates.py` — collect real digit glyphs
+  from broadcast video, then fuse them into `data/digit_templates/`.
+- `build_icon_templates.py` — game-piece icon templates from sourced art
+  (`data/icon_templates_src/` → `data/icon_templates/`).
 
-`viz/03_events_view.py` — feeds from 03_events output. Timeline plot of both
-alliance scores over the match with phase boundaries marked. Quick visual check
-that the extracted events look reasonable.
+## debug/
+
+- `test_layouts.py` — per-event layout tests.
+
+`detect_phases.py` and `detect_overlay.py` still take a `--viz` flag that draws
+their own intermediate results.
 
 ## Design notes
 
