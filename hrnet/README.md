@@ -35,11 +35,11 @@ Commands below are run from `hrnet/`.
 
 ```
 R2 (150GB images) ──┐
-                    ├─► pull_dataset.py ─► exports/manifest.jsonl + local image mirror
+                    ├─► pull_dataset.py ─► data/exports/manifest.jsonl + local image mirror
 Label Studio ───────┘
                               │
                               ▼
-                        train.py ─► checkpoints/best.pt   (season-holdout val)
+                        train.py ─► data/checkpoints/best.pt   (season-holdout val)
                               │
                               ▼
                         prelabel.py ─► predictions pushed back to Label Studio
@@ -82,7 +82,7 @@ python train/train.py
 
 Holds out the entire `val_season` for validation (not random frames — 0.5fps
 frames from one match are near-duplicates and would leak). Reports PCK-style
-precision/recall/F1 with one-to-one same-alliance matching. Saves `best.pt`.
+precision/recall/F1 with one-to-one same-alliance matching. Saves `data/checkpoints/best.pt`.
 
 ### Step 3 — predict back into Label Studio
 
