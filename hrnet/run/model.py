@@ -13,10 +13,6 @@ Design:
     peak map at stride 4. No boxes, no anchors, no NMS-of-boxes.
   - Loss: per-pixel MSE on the heatmaps with foreground weighting.
     (This is the CenterNet/pose-heatmap formulation.)
-
-Why not YOLO-pose: it needs box<->keypoint association. Our points can sit
-outside any robot box (airborne climb) and robots overlap heavily, so the
-box relationship is unreliable. Heatmap peak-finding sidesteps all of that.
 """
 import torch
 import torch.nn as nn

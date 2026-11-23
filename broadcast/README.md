@@ -10,7 +10,7 @@ score values (useful for validating CV-derived scoring estimates).
 
 ## Inputs
 
-- Match video with audio (the same source used by homography/ and tracking/)
+- Match video with audio (the same source used by homography/ and mtmct/)
 - Optionally: TBA match result (for post-hoc validation of extracted scores)
 
 ## What this extracts
@@ -24,9 +24,6 @@ Secondary signal: CG overlay countdown timer / phase indicator.
 record `{t_sec, alliance, old_score, new_score, delta}`. The delta tells you
 when a scoring event occurred and approximately how many points it was worth,
 without knowing which robot caused it.
-
-**Penalty events** — score increases that don't correspond to a known scoring
-action (useful as a foul signal for match prediction).
 
 ## run/ — per match
 
@@ -70,14 +67,17 @@ their own intermediate results.
 
 ## Design notes
 
-- The FRC game buzzer is acoustically distinctive and consistent year to year —
-  a short burst of a specific frequency. Audio detection should be reliable even
-  with crowd noise.
-- CG scoreboard position and font vary by broadcast production team (regional
-  vs. district vs. championship). The crop region will need calibration per
-  event, similar to how homography needs a profile per match.
-- Score OCR is the fragile part — graphics sometimes animate in/out, and digits
-  can be partially occluded during score updates. Aggregate over a small window
-  (±3 frames) and take the most-common reading.
+- Phases come from matching the official FMS audio cues, not from a generic
+  buzzer detector. Plain normalized cross-correlation (NCC) beat GCC-PHAT and
+  ROTH-weighted GCC on the broadcast audio; the sweep is in `detect_phases.py`.
+- Overlay regions are found by behaviour (`detect_overlay.py`), so the
+  scoreboard needs no per-event crop calibration. `layouts.py` is still
+  hand-measured per event, but it covers the field outline, printed-digit boxes
+  and spotter ignore boxes, not the scoreboard.
+- Score reading is the fragile part — graphics animate in and out, and digits
+  can be partly hidden during score updates. `read_overlay.py` reads only
+  settled frames and takes a majority vote over each run of stable frames.
+  Voting suppresses transient errors but not systematic ones: its `agreement`
+  value measures stability, not correctness.
 - Score deltas are alliance-level only (same limitation as TBA data). Attribution
   to individual robots still requires CV-based scoring detection.
